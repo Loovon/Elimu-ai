@@ -18,7 +18,7 @@ import os
 from typing import Optional
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-_DEFAULT_OLLAMA_MODEL  = "qwen2.5-coder:7b"
+_DEFAULT_OLLAMA_MODEL  = "qwen2.5:0.5b"
 _DEFAULT_EMBED_MODEL   = "nomic-embed-text"
 _DEFAULT_GEMINI_MODEL  = "gemini-1.5-flash"
 _DEFAULT_OPENAI_MODEL  = "gpt-4o-mini"
