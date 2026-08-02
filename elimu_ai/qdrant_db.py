@@ -1,47 +1,58 @@
-from google import genai
-from qdrant_client import QdrantClient
+"""
+elimu_ai/qdrant_db.py
 
-from elimu_ai.config import (
-    GEMINI_API_KEY,
-    QDRANT_URL,
-    QDRANT_API_KEY,
-    COLLECTION_NAME,
-)
+Qdrant vector store client.
+Responsibilities:
+  - embed(text)         → delegate to gemini.embed()
+  - search(query, n)    → embed then query Qdrant, return ScoredPoint list
 
-# Gemini client
-client = genai.Client(api_key=GEMINI_API_KEY)
+No business logic.  No Gemini generation.
+"""
 
-# Qdrant client
-qdrant = QdrantClient(
-    url=QDRANT_URL,
-    api_key=QDRANT_API_KEY,
-)
+from __future__ import annotations
+
+from typing import List
+
+from elimu_ai.config import QDRANT_URL, QDRANT_API_KEY, COLLECTION_NAME, MAX_RESULTS
+from elimu_ai.gemini import embed as gemini_embed
+
+_qdrant = None
 
 
-def embed(text: str):
+def _get_client():
+    """Lazy-initialise the Qdrant client so import never crashes."""
+    global _qdrant
+    if _qdrant is not None:
+        return _qdrant
+    if not QDRANT_URL:
+        return None
+    try:
+        from qdrant_client import QdrantClient
+        _qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY or None)
+        return _qdrant
+    except Exception:
+        return None
+
+
+def search(query: str, limit: int = MAX_RESULTS) -> List:
     """
-    Generate Gemini embeddings.
+    Embed the query and search Qdrant.
+    Returns a list of ScoredPoint objects, or [] on any error.
     """
+    client = _get_client()
+    if client is None:
+        return []
 
-    response = client.models.embed_content(
-        model="text-embedding-004",
-        contents=text,
-    )
+    vector = gemini_embed(query)
+    if not vector:
+        return []
 
-    return response.embeddings[0].values
-
-
-def search(question: str, limit=5):
-    """
-    Search Qdrant.
-    """
-
-    vector = embed(question)
-
-    results = qdrant.query_points(
-        collection_name=COLLECTION_NAME,
-        query=vector,
-        limit=limit,
-    )
-
-    return results.points
+    try:
+        results = client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=vector,
+            limit=limit,
+        )
+        return results.points
+    except Exception:
+        return []

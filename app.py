@@ -1,37 +1,15 @@
-from ollama import chat
+"""
+app.py
 
-messages = [
-    {
-        'role': 'system',
-        'content': 'You are my AI mentor helping me learn AI and build Elimu Talks.'
-    }
-]
+ASGI application entry point for production deployment.
+Exposes the FastAPI app from elimu_ai.service as `application`
+for use with Gunicorn + Uvicorn workers.
 
-print("AI Assistant Started!")
-print("Type 'exit' to quit.\n")
+Run locally:
+    uvicorn app:application --reload
 
-while True:
-    user_input = input("You: ")
+Production:
+    gunicorn app:application -k uvicorn.workers.UvicornWorker
+"""
 
-    if user_input.lower() == "exit":
-        break
-
-    messages.append({
-        'role': 'user',
-        'content': user_input
-    })
-
-    response = chat(
-        model='qwen2.5:0.5b',
-        messages=messages
-    )
-
-    ai_message = response['message']['content']
-
-    print("\nAI:", ai_message)
-    print()
-
-    messages.append({
-        'role': 'assistant',
-        'content': ai_message
-    })
+from elimu_ai.service import app as application  # noqa: F401  (re-exported for ASGI servers)
