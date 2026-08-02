@@ -2,7 +2,7 @@ from pypdf import PdfReader
 from ollama import embeddings
 import chromadb
 
-reader = PdfReader("documents/biology.pdf")
+reader = PdfReader("Documents/biology.pdf")
 
 text = ""
 

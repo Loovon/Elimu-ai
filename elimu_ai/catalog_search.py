@@ -22,8 +22,14 @@ def current_year() -> str:
     return str(_date.today().year)
 
 
-_INDEX_PATH   = pathlib.Path(r"C:\Users\Lootus\MyAgent\elimu_index.json")
-_CATALOG_PATH = pathlib.Path(r"C:\Users\Lootus\MyAgent\elimu_catalog.json")
+
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+INDEX_PATH = BASE_DIR / "elimu_index.json"
+
+_CATALOG_PATH = BASE_DIR / "elimu_catalog.json"
 _index   = None
 _catalog = None
 

@@ -4,9 +4,9 @@
 import os
 import re
 from urllib.parse import quote
-from elimu_ai.llm import generate as _llm_generate, embed as _llm_embed
+from elimu_ai.gemini import generate
 
-_CHROMA_PATH = r"C:\\Users\\Lootus\\MyAgent\\chroma_db"
+
 _client = None
 _collection = None
 
@@ -68,7 +68,7 @@ def generate_quiz(question):
         "Do NOT write any URLs — they will be added separately."
     )
     try:
-        resp_text = _llm_generate(prompt=prompt)
+        resp_text = generate(prompt)
         answer = _strip_md(resp_text or "")
     except Exception:
         answer = "Could not generate quiz right now."

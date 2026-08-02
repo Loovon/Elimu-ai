@@ -1,7 +1,6 @@
 ﻿# elimu_ai/tools/forum.py  (patched by ElimuTalks)
 from django.utils.text import slugify
-from elimu_ai.llm import generate as _llm_generate
-
+from elimu_ai.gemini import generate
 
 def _unique_slug(title):
     from forum.models import Thread
@@ -19,7 +18,7 @@ def generate_forum_post(topic):
         f"Return JSON with keys: title (string), body (string). "
         f"No markdown, just valid JSON."
     )
-    response_text = _llm_generate(prompt=prompt)
+    response_text = generate(prompt)
     class _R: pass
     response = _R()
     response_content = response_text

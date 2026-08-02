@@ -1,0 +1,17 @@
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams
+
+client = QdrantClient(
+    url="https://bec088f0-2eaf-4bbb-ad5b-a93b27aaec5b.us-east-2-0.aws.cloud.qdrant.io",
+    api_key="YOUR_Q"
+)
+
+client.recreate_collection(
+    collection_name="elimu_library",
+    vectors_config=VectorParams(
+        size=768,
+        distance=Distance.COSINE
+    )
+)
+
+print("Collection created successfully!")
