@@ -25,7 +25,7 @@ def _optional(name: str, default: str = "") -> str:
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY: str = _optional("GEMINI_API_KEY")
-LLM_MODEL: str = _optional("LLM_MODEL", "gemini-2.5-flash")
+LLM_MODEL: str = _optional("LLM_MODEL", "gemini-2.5-flash-lite")
 EMBED_MODEL: str = _optional("EMBED_MODEL", "text-embedding-004")
 
 # ── Qdrant ────────────────────────────────────────────────────────────────────

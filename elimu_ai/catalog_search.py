@@ -27,7 +27,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-INDEX_PATH = BASE_DIR / "elimu_index.json"
+_INDEX_PATH = BASE_DIR / "elimu_index.json"
 
 _CATALOG_PATH = BASE_DIR / "elimu_catalog.json"
 _index   = None
