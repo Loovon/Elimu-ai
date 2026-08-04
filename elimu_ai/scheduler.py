@@ -1,80 +1,97 @@
 """
 elimu_ai/scheduler.py
 
-Background agent scheduler.
+Autonomous background scheduler — runs continuously alongside the FastAPI server.
 
-Responsibilities:
-  - Run recurring background tasks independently of the chat API.
-  - Each task is isolated and fails gracefully.
+Design:
+  - Each task has its own interval (configurable via environment variables in config.py).
+  - Tasks run in a single background thread; each task catches its own exceptions.
+  - The scheduler loop never exits unless the process is killed.
+  - Status is written to service.scheduler_status so /scheduler/status can read it.
 
-Supported tasks:
-  - answer_unanswered     : Auto-answer forum threads with no replies
-  - generate_discussions  : Post daily discussion starters to the forum
-  - recommend_resources   : Suggest materials for popular unanswered topics
-  - moderate_content      : Scan recent posts for spam / policy violations
-  - catalog_sync          : Trigger re-indexing of the Elimu Library catalog (hook)
+Usage (start in background thread alongside FastAPI):
+    from elimu_ai.scheduler import start_scheduler
+    start_scheduler()
 
-Usage:
-    # Run all tasks once (e.g. from a cron job or management command):
+Usage (run all tasks once, e.g. from a management command):
     from elimu_ai.scheduler import run_all_tasks
     run_all_tasks()
-
-    # Or run individual tasks:
-    from elimu_ai.scheduler import task_answer_unanswered
-    task_answer_unanswered()
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Callable, List
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Callable, Dict, List
+
+from elimu_ai.config import (
+    SCHEDULER_ANSWER_INTERVAL,
+    SCHEDULER_CATALOG_INTERVAL,
+    SCHEDULER_DISCUSS_INTERVAL,
+    SCHEDULER_MODERATE_INTERVAL,
+    SCHEDULER_RECOMMEND_INTERVAL,
+)
 
 logger = logging.getLogger(__name__)
 
+# ── Task definitions ──────────────────────────────────────────────────────────
 
-# ── Individual tasks ──────────────────────────────────────────────────────────
-
-def task_answer_unanswered() -> None:
+def task_answer_unanswered() -> str:
     """Auto-answer forum threads that have been unanswered for 3+ hours."""
     try:
         from elimu_ai.tools.answer import answer_unanswered_threads
         count = answer_unanswered_threads()
-        logger.info("task_answer_unanswered: answered %d threads.", count)
+        msg = f"Answered {count} threads."
+        logger.info("scheduler [answer_unanswered]: %s", msg)
+        return msg
     except Exception as exc:
-        logger.error("task_answer_unanswered failed: %s", exc)
+        logger.error("scheduler [answer_unanswered] failed: %s", exc)
+        return f"Error: {exc}"
 
 
-def task_generate_discussions() -> None:
-    """Post a daily discussion starter to the forum."""
-    _DAILY_TOPICS = [
+def task_generate_discussions() -> str:
+    """Post a rotating daily discussion starter to the ElimuTalks forum."""
+    _TOPICS = [
         "What is the hardest topic in KCSE Mathematics and why?",
         "How can students improve their English writing skills?",
         "What study habits work best for CBC learners?",
         "Share a Biology concept you found confusing and how you mastered it.",
         "What is the most useful subject for everyday life in Kenya?",
+        "How should schools prepare students for KCSE exams?",
+        "What role should parents play in their child's academic life?",
+        "Which CBC subjects do you find most interesting and why?",
     ]
     try:
-        from datetime import date
         from elimu_ai.tools.forum import create_discussion
-        # Pick a topic based on the day of year to rotate through the list
-        topic = _DAILY_TOPICS[date.today().timetuple().tm_yday % len(_DAILY_TOPICS)]
+        topic = _TOPICS[datetime.now(tz=timezone.utc).timetuple().tm_yday % len(_TOPICS)]
         result = create_discussion(topic)
-        logger.info("task_generate_discussions: %s", result[:80])
+        msg = result[:120]
+        logger.info("scheduler [generate_discussions]: %s", msg)
+        return msg
     except Exception as exc:
-        logger.error("task_generate_discussions failed: %s", exc)
+        logger.error("scheduler [generate_discussions] failed: %s", exc)
+        return f"Error: {exc}"
 
 
-def task_recommend_resources() -> None:
-    """Post resource recommendations to threads that ask for materials."""
+def task_recommend_resources() -> str:
+    """Post resource recommendations to resource-request threads that have no replies."""
     try:
-        from elimu_ai.tools.answer import unanswered_threads
-        from elimu_ai.tools.library import find_materials
         from elimu_ai.tools.forum import _django_available
         if not _django_available():
-            return
+            return "Django not available — skipped."
+
         from django.contrib.auth.models import User
         from forum.models import Post
         from elimu_ai.personas import LIBRARIAN
+        from elimu_ai.tools.answer import unanswered_threads
+        from elimu_ai.tools.library import find_materials
+
+        _RESOURCE_KEYWORDS = [
+            "notes", "revision", "past paper", "scheme", "resources",
+            "materials", "lesson plan", "assessment", "homework",
+        ]
 
         ai_user, _ = User.objects.get_or_create(
             username=LIBRARIAN,
@@ -83,66 +100,168 @@ def task_recommend_resources() -> None:
         count = 0
         for thread in unanswered_threads():
             lower = thread.title.lower()
-            if any(kw in lower for kw in ["notes", "revision", "past paper", "scheme", "resources"]):
+            if any(kw in lower for kw in _RESOURCE_KEYWORDS):
                 if thread.posts.count() == 1:
                     answer = find_materials(thread.title)
                     Post.objects.create(thread=thread, author=ai_user, content=answer)
                     count += 1
-        logger.info("task_recommend_resources: posted %d resource replies.", count)
+        msg = f"Posted {count} resource replies."
+        logger.info("scheduler [recommend_resources]: %s", msg)
+        return msg
     except Exception as exc:
-        logger.error("task_recommend_resources failed: %s", exc)
+        logger.error("scheduler [recommend_resources] failed: %s", exc)
+        return f"Error: {exc}"
 
 
-def task_moderate_content() -> None:
-    """Scan recent posts for spam and policy violations."""
+def task_moderate_content() -> str:
+    """Scan posts from the last hour for spam and policy violations."""
     try:
-        from elimu_ai.tools.moderation import moderate
         from elimu_ai.tools.forum import _django_available
         if not _django_available():
-            return
-        from django.utils import timezone
-        from datetime import timedelta
-        from forum.models import Post
+            return "Django not available — skipped."
 
-        cutoff = timezone.now() - timedelta(hours=1)
+        from datetime import timedelta
+        from django.utils import timezone as dj_timezone
+        from forum.models import Post
+        from elimu_ai.tools.moderation import moderate
+
+        cutoff = dj_timezone.now() - timedelta(hours=1)
         recent_posts = Post.objects.filter(created_at__gte=cutoff)
+        total = recent_posts.count()
         flagged = 0
         for post in recent_posts:
             result = moderate(post.content or "")
             if result != "Content approved.":
-                logger.warning("Flagged post #%s: %s", post.pk, result)
+                logger.warning("scheduler [moderate]: post #%d flagged: %s", post.pk, result)
                 flagged += 1
-        logger.info("task_moderate_content: %d/%d posts flagged.", flagged, recent_posts.count())
+
+        msg = f"Scanned {total} posts, flagged {flagged}."
+        logger.info("scheduler [moderate_content]: %s", msg)
+        return msg
     except Exception as exc:
-        logger.error("task_moderate_content failed: %s", exc)
+        logger.error("scheduler [moderate_content] failed: %s", exc)
+        return f"Error: {exc}"
 
 
-def task_catalog_sync() -> None:
+def task_catalog_sync() -> str:
     """
-    Hook point for triggering a catalog re-index.
-    Actual crawl/index logic lives in the Django management command
-    or the crawl scripts at the project root.
+    Hook for catalog re-indexing.
+    Actual crawl logic lives in: python manage.py index_elimu_catalog
+    This task refreshes the in-memory cache by reloading from disk.
     """
-    logger.info(
-        "task_catalog_sync: catalog sync hook called. "
-        "Run 'python manage.py index_elimu_catalog' to rebuild the index."
-    )
+    try:
+        import importlib
+        import elimu_ai.catalog_search as cs
+        # Reset cache so next search reloads from disk
+        cs._index   = None
+        cs._catalog = None
+        cs._load()
+        msg = "Catalog cache refreshed."
+        logger.info("scheduler [catalog_sync]: %s", msg)
+        return msg
+    except Exception as exc:
+        logger.error("scheduler [catalog_sync] failed: %s", exc)
+        return f"Error: {exc}"
 
 
-# ── Task runner ───────────────────────────────────────────────────────────────
+# ── Task registry ─────────────────────────────────────────────────────────────
 
-_ALL_TASKS: List[Callable] = [
-    task_answer_unanswered,
-    task_generate_discussions,
-    task_recommend_resources,
-    task_moderate_content,
-    task_catalog_sync,
+# (name, function, interval_seconds)
+_TASK_REGISTRY: List[tuple] = [
+    ("answer_unanswered",   task_answer_unanswered,   SCHEDULER_ANSWER_INTERVAL),
+    ("generate_discussions",task_generate_discussions, SCHEDULER_DISCUSS_INTERVAL),
+    ("recommend_resources", task_recommend_resources,  SCHEDULER_RECOMMEND_INTERVAL),
+    ("moderate_content",    task_moderate_content,     SCHEDULER_MODERATE_INTERVAL),
+    ("catalog_sync",        task_catalog_sync,         SCHEDULER_CATALOG_INTERVAL),
 ]
 
 
-def run_all_tasks() -> None:
-    """Run every registered background task in sequence, logging failures."""
-    logger.info("Background agent: running %d tasks.", len(_ALL_TASKS))
-    for task in _ALL_TASKS:
-        task()
-    logger.info("Background agent: all tasks complete.")
+# ── Continuous scheduler loop ─────────────────────────────────────────────────
+
+class _TaskState:
+    """Tracks when each task last ran."""
+    def __init__(self, interval: int):
+        self.interval   = interval
+        self.last_ran   = 0.0       # epoch seconds
+        self.last_result: str = "not yet run"
+
+    def is_due(self) -> bool:
+        return (time.monotonic() - self.last_ran) >= self.interval
+
+    def mark_ran(self, result: str) -> None:
+        self.last_ran    = time.monotonic()
+        self.last_result = result
+
+
+def _scheduler_loop() -> None:
+    """
+    Main scheduler loop. Runs each task on its own interval.
+    Never exits — must be run in a daemon thread.
+    """
+    # Import here to avoid circular import at module level
+    try:
+        from elimu_ai.service import scheduler_status
+        scheduler_status["running"]    = True
+        scheduler_status["started_at"] = datetime.now(tz=timezone.utc).isoformat()
+    except Exception:
+        scheduler_status = {}
+
+    states: Dict[str, _TaskState] = {
+        name: _TaskState(interval)
+        for name, _, interval in _TASK_REGISTRY
+    }
+
+    logger.info(
+        "Scheduler started with %d tasks: %s",
+        len(_TASK_REGISTRY),
+        [name for name, _, _ in _TASK_REGISTRY],
+    )
+
+    while True:
+        for name, fn, _ in _TASK_REGISTRY:
+            state = states[name]
+            if state.is_due():
+                logger.debug("scheduler: running task %s", name)
+                result = fn()
+                state.mark_ran(result)
+                try:
+                    from elimu_ai.service import scheduler_status
+                    scheduler_status["last_run"][name] = {
+                        "at":     datetime.now(tz=timezone.utc).isoformat(),
+                        "result": result,
+                    }
+                except Exception:
+                    pass
+
+        time.sleep(10)  # check task readiness every 10 seconds
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def start_scheduler(daemon: bool = True) -> threading.Thread:
+    """
+    Start the scheduler in a background thread.
+    Call this once at application startup.
+    Returns the Thread object.
+    """
+    thread = threading.Thread(
+        target=_scheduler_loop,
+        name="elimu-scheduler",
+        daemon=daemon,
+    )
+    thread.start()
+    logger.info("Scheduler thread started (daemon=%s).", daemon)
+    return thread
+
+
+def run_all_tasks() -> Dict[str, str]:
+    """
+    Run every task once immediately and return a dict of results.
+    Useful for management commands and testing.
+    """
+    results: Dict[str, str] = {}
+    logger.info("run_all_tasks: running %d tasks.", len(_TASK_REGISTRY))
+    for name, fn, _ in _TASK_REGISTRY:
+        results[name] = fn()
+    logger.info("run_all_tasks: complete.")
+    return results

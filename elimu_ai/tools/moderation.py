@@ -1,41 +1,50 @@
 """
 elimu_ai/tools/moderation.py
 
-Moderation tool — content safety checks.
+Content moderation tool.
 Responsibilities:
-  - moderate(text) → str   ("approved" | reason for rejection)
+  - moderate(text) → "Content approved." | rejection reason string
 
-Extend this module with Gemini-based moderation when needed.
+Extend with Gemini-based semantic moderation when needed.
 """
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 _SPAM_PATTERNS = [
     "buy now",
     "click here",
     "free money",
-    "winner",
+    "you have won",
     "congratulations you have won",
     "whatsapp me",
     "call me on",
+    "send me your number",
+    "guaranteed income",
+    "make money fast",
 ]
+
+_MIN_LENGTH = 5
 
 
 def moderate(text: str) -> str:
     """
-    Basic content moderation check.
-    Returns "Content approved." or a rejection reason.
+    Check text for spam / policy violations.
+    Returns "Content approved." or a short rejection reason.
     """
     if not text or not text.strip():
         return "Content rejected: empty message."
 
+    if len(text.strip()) < _MIN_LENGTH:
+        return "Content rejected: too short."
+
     lower = text.lower()
     for pattern in _SPAM_PATTERNS:
         if pattern in lower:
+            logger.info("moderation: flagged text matching %r", pattern)
             return f"Content flagged: possible spam (matched: '{pattern}')."
-
-    if len(text) < 5:
-        return "Content rejected: too short."
 
     return "Content approved."

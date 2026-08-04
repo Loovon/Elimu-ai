@@ -2,38 +2,38 @@
 elimu_ai/config.py
 
 Single source of truth for all configuration constants.
-Reads from environment variables — raises clear errors on missing required keys.
+Reads from environment variables. Optional vars get safe defaults.
+Required vars (GEMINI_API_KEY) are validated at call time in gemini.py,
+not at import time, so the service can start and report the error cleanly.
 """
+
+from __future__ import annotations
 
 import os
 
-
-def _require(name: str) -> str:
-    """Return env var value or raise a descriptive error."""
-    value = os.getenv(name)
-    if not value:
-        raise EnvironmentError(
-            f"Missing required environment variable: {name}. "
-            f"Please set it before starting the service."
-        )
-    return value
-
-
-def _optional(name: str, default: str = "") -> str:
-    return os.getenv(name, default)
-
-
 # ── Gemini ────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY: str = _optional("GEMINI_API_KEY")
-LLM_MODEL: str = _optional("LLM_MODEL", "gemini-2.5-flash-lite")
-EMBED_MODEL: str = _optional("EMBED_MODEL", "text-embedding-004")
+GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+LLM_MODEL: str      = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+EMBED_MODEL: str    = os.getenv("EMBED_MODEL", "text-embedding-004")
 
 # ── Qdrant ────────────────────────────────────────────────────────────────────
-QDRANT_URL: str = _optional("QDRANT_URL")
-QDRANT_API_KEY: str = _optional("QDRANT_API_KEY")
-COLLECTION_NAME: str = _optional("COLLECTION_NAME", "elimu_library")
+QDRANT_URL: str     = os.getenv("QDRANT_URL", "")
+QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
+COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "elimu_library")
 
 # ── Application ───────────────────────────────────────────────────────────────
-SYSTEM_NAME: str = "Elimu AI"
-REFERRAL_ID: str = _optional("REFERRAL_ID", "elm-elimutalks-1")
-MAX_RESULTS: int = int(_optional("MAX_RESULTS", "5"))
+SYSTEM_NAME: str  = "Elimu AI"
+SYSTEM_VERSION: str = "2.1.0"
+REFERRAL_ID: str  = os.getenv("REFERRAL_ID", "elm-elimutalks-1")
+MAX_RESULTS: int  = int(os.getenv("MAX_RESULTS", "5"))
+
+# ── Scheduler ─────────────────────────────────────────────────────────────────
+# How often each background task runs, in seconds.
+SCHEDULER_ANSWER_INTERVAL: int    = int(os.getenv("SCHEDULER_ANSWER_INTERVAL",    "1800"))   # 30 min
+SCHEDULER_DISCUSS_INTERVAL: int   = int(os.getenv("SCHEDULER_DISCUSS_INTERVAL",   "86400"))  # 24 hr
+SCHEDULER_RECOMMEND_INTERVAL: int = int(os.getenv("SCHEDULER_RECOMMEND_INTERVAL", "3600"))   # 1 hr
+SCHEDULER_MODERATE_INTERVAL: int  = int(os.getenv("SCHEDULER_MODERATE_INTERVAL",  "900"))    # 15 min
+SCHEDULER_CATALOG_INTERVAL: int   = int(os.getenv("SCHEDULER_CATALOG_INTERVAL",   "43200"))  # 12 hr
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

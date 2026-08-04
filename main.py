@@ -1,15 +1,21 @@
 """
 main.py
 
-CLI entry point for local development and testing.
-Runs a simple REPL that exercises run_agent() directly.
+Interactive CLI for local development and testing.
+Exercises run_agent() directly without starting the FastAPI server.
+
+Usage:
+    python main.py
 """
+
+from __future__ import annotations
 
 from elimu_ai.agent import run_agent
 
 
 def main() -> None:
-    print("Elimu AI — interactive mode. Type 'exit' to quit.\n")
+    print("Elimu AI — interactive mode")
+    print("Type 'exit' to quit.\n")
     history = []
 
     while True:
@@ -21,20 +27,19 @@ def main() -> None:
 
         if not question:
             continue
-        if question.lower() == "exit":
+        if question.lower() in ("exit", "quit"):
             break
 
         result = run_agent(question, history)
 
         print(f"\nPersona : {result['persona']}")
         print(f"Tools   : {', '.join(result['tools'])}")
-        print(f"\nAnswer:\n{result['answer']}")
+        print(f"\n{result['answer']}")
 
         if result["sources"]:
             print("\nSources:")
             for s in result["sources"]:
-                print(f"  - {s}")
-
+                print(f"  {s}")
         print()
 
         history.append({"role": "user",      "content": question})

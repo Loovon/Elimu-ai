@@ -3,9 +3,9 @@ elimu_ai/tools/recommendations.py
 
 Recommendations tool — surfaces relevant Elimu Library materials.
 Responsibilities:
-  - recommend(question, grade, subject, term, year, audience) → str
+  - recommend(question, ...) → formatted catalog results string
 
-Thin wrapper over library.find_materials() that adds a header.
+Thin wrapper over library.find_materials() to maintain a stable public API.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ def recommend(
     audience: Optional[str] = None,
 ) -> str:
     """
-    Return a formatted list of recommended Elimu Library materials
-    for the given question and optional metadata hints.
+    Return formatted Elimu Library material recommendations for a query.
+    Delegates entirely to find_materials().
     """
     return find_materials(
         question=question,
