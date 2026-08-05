@@ -158,18 +158,18 @@ def _score(
     Audience mismatch is penalised so students don't see teacher schemes.
     """
     score = 0
-    if grade   and _norm(doc.get("grade", ""))   == _norm(grade):   score += 6
-    if subject and _norm(doc.get("subject", "")) == _norm(subject): score += 6
-    if term    and str(doc.get("term", ""))      == str(term):      score += 3
-    if year    and str(doc.get("year", ""))      == str(year):      score += 3
-    if audience and doc.get("audience", "") == audience:            score += 2
+    if grade   and _norm(doc.get("grade")   or "") == _norm(grade):   score += 6
+    if subject and _norm(doc.get("subject") or "") == _norm(subject): score += 6
+    if term    and str(doc.get("term")   or "") == str(term):         score += 3
+    if year    and str(doc.get("year")   or "") == str(year):         score += 3
+    if audience and (doc.get("audience") or "") == audience:          score += 2
 
     # Penalise teacher-audience docs when student/unspecified is requesting
-    doc_aud = doc.get("audience", "")
+    doc_aud = doc.get("audience") or ""
     if doc_aud == "teacher" and audience in (None, "student", ""):
         score -= 4
 
-    if doc_type and doc_type in _norm(doc.get("doctype", "") + doc.get("category", "")):
+    if doc_type and doc_type in _norm((doc.get("doctype") or "") + (doc.get("category") or "")):
         score += 2
 
     return score

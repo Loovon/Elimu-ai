@@ -35,6 +35,9 @@ SCHEDULER_RECOMMEND_INTERVAL: int = int(os.getenv("SCHEDULER_RECOMMEND_INTERVAL"
 SCHEDULER_MODERATE_INTERVAL: int  = int(os.getenv("SCHEDULER_MODERATE_INTERVAL",  "900"))    # 15 min
 SCHEDULER_CATALOG_INTERVAL: int   = int(os.getenv("SCHEDULER_CATALOG_INTERVAL",   "43200"))  # 12 hr
 
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+
 # ── Django API integration ────────────────────────────────────────────────────
 # Base URL of the ElimuTalks Django REST API.
 # Used by http_client.py for all outbound requests.

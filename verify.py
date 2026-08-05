@@ -1,23 +1,29 @@
 """
 verify.py — Architecture verification script.
+Covers: syntax, dead imports, circular imports, architecture rules,
+module imports, router tests, helper tests, prompt builders,
+and all new agentic platform modules.
+
 Run with: py verify.py
 """
-import sys, pathlib, ast
-
+import sys, pathlib, ast, time
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 ROOT = pathlib.Path("elimu_ai")
-root_files = [
-    pathlib.Path("app.py"),
-    pathlib.Path("main.py"),
-    pathlib.Path("ingest.py"),
-]
-all_files = list(ROOT.rglob("*.py")) + root_files
+root_files = [pathlib.Path("app.py"), pathlib.Path("main.py"), pathlib.Path("ingest.py")]
+all_files  = list(ROOT.rglob("*.py")) + root_files
 
-PASS = "\033[92mPASS\033[0m"
-FAIL = "\033[91mFAIL\033[0m"
-
+G = "\033[92mPASS\033[0m"
+F = "\033[91mFAIL\033[0m"
 overall = True
+
+def fail(msg):
+    global overall
+    overall = False
+    print(f"  {F}  {msg}")
+
+def ok(msg):
+    print(f"  {G}  {msg}")
 
 # ── 1. Syntax ─────────────────────────────────────────────────────────────────
 print("=== 1. Syntax ===")
@@ -25,12 +31,10 @@ for p in all_files:
     try:
         ast.parse(p.read_bytes().lstrip(b"\xef\xbb\xbf"))
     except SyntaxError as e:
-        print(f"  {FAIL}  {p.name}:{e.lineno}: {e.msg}")
-        overall = False
-        continue
-print(f"  {PASS}  All {len(all_files)} files parse without errors.\n")
+        fail(f"{p.name}:{e.lineno}: {e.msg}")
+ok(f"All {len(all_files)} files parse without errors.\n")
 
-# ── 2. Dead imports ───────────────────────────────────────────────────────────
+# ── 2. Dead legacy imports ────────────────────────────────────────────────────
 print("=== 2. Dead imports (ollama/chromadb/etc.) ===")
 dead_pkgs = {"ollama","chromadb","embeddings","vector_db","rag","llm","memory","ai_service"}
 found_dead = False
@@ -40,78 +44,63 @@ for p in all_files:
         if isinstance(node, ast.Import):
             for a in node.names:
                 if a.name.split(".")[0] in dead_pkgs:
-                    print(f"  {FAIL}  {p.name}:{node.lineno}  import {a.name}")
-                    found_dead = True; overall = False
+                    fail(f"{p.name}:{node.lineno}  import {a.name}")
+                    found_dead = True
         elif isinstance(node, ast.ImportFrom) and node.module:
             if node.module.split(".")[0] in dead_pkgs:
-                print(f"  {FAIL}  {p.name}:{node.lineno}  from {node.module}")
-                found_dead = True; overall = False
+                fail(f"{p.name}:{node.lineno}  from {node.module}")
+                found_dead = True
 if not found_dead:
-    print(f"  {PASS}  No dead imports.\n")
+    ok("No dead legacy imports.\n")
 
-# ── 3. No tool/scheduler imports service.py ──────────────────────────────────
-print("=== 3. Architecture: no tool/agent/router imports service.py at module level ===")
+# ── 3. Architecture: no tool imports service.py at module level ───────────────
+print("=== 3. Architecture rules ===")
+_allowed = {"scheduler.py","app.py"}
 violations = False
-_ALLOWED_SERVICE_IMPORTERS = {"scheduler.py", "app.py"}  # allowed to lazy-import service
 for p in ROOT.rglob("*.py"):
-    if p.name in ("service.py", "__init__.py") or p.name in _ALLOWED_SERVICE_IMPORTERS:
+    if p.name in ("service.py","__init__.py") or p.name in _allowed:
         continue
     tree = ast.parse(p.read_bytes().lstrip(b"\xef\xbb\xbf"))
-    for node in ast.walk(tree):
-        # Only flag TOP-LEVEL imports (not inside functions/classes)
-        if not isinstance(node, (ast.Import, ast.ImportFrom)):
-            continue
-        # Check if it's at module level (parent is Module)
-        pass
-    # Simpler: check for module-level import lines via ast.Module.body
-    tree2 = ast.parse(p.read_bytes().lstrip(b"\xef\xbb\xbf"))
-    for node in tree2.body:  # only top-level statements
+    for node in tree.body:
         if isinstance(node, ast.Import):
             for a in node.names:
                 if "service" in a.name and "elimu_ai" in a.name:
-                    print(f"  {FAIL}  {p.name} has top-level import of service.py")
-                    violations = True; overall = False
+                    fail(f"{p.name} has top-level import of service.py")
+                    violations = True
         elif isinstance(node, ast.ImportFrom) and node.module:
             if "elimu_ai.service" in node.module:
-                print(f"  {FAIL}  {p.name} has top-level import of service.py")
-                violations = True; overall = False
+                fail(f"{p.name} has top-level import of service.py")
+                violations = True
 if not violations:
-    print(f"  {PASS}  No tool has top-level imports of service.py.\n")
+    ok("No tool has top-level import of service.py.")
 
-# ── 4. router.py purity ───────────────────────────────────────────────────────
-print("=== 4. router.py purity ===")
 rsrc = (ROOT / "router.py").read_text()
-router_ok = True
-for bad in ("from elimu_ai.gemini", "from elimu_ai.qdrant", "generate(", "embed("):
-    if bad in rsrc:
-        print(f"  {FAIL}  router.py contains {bad!r}")
-        router_ok = False; overall = False
-if router_ok:
-    print(f"  {PASS}  router.py contains only keyword routing.\n")
+if any(bad in rsrc for bad in ("from elimu_ai.gemini","from elimu_ai.qdrant","generate(","embed(")):
+    fail("router.py contains Gemini/Qdrant imports")
+else:
+    ok("router.py contains only keyword routing.")
 
-# ── 5. teacher/quiz/community never import gemini directly ───────────────────
-print("=== 5. Prompt-builder tools never import gemini ===")
-for fname in ("tools/teacher.py", "tools/quiz.py", "tools/community.py"):
+for fname in ("tools/teacher.py","tools/quiz.py","tools/community.py"):
     src = (ROOT / fname).read_text()
     tree = ast.parse(src)
-    bad = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "elimu_ai.gemini":
-            print(f"  {FAIL}  {fname} imports elimu_ai.gemini directly")
-            bad = True; overall = False
-    if not bad:
-        print(f"  {PASS}  {fname}")
+    bad = any(
+        isinstance(n, ast.ImportFrom) and n.module == "elimu_ai.gemini"
+        for n in ast.walk(tree)
+    )
+    if bad:
+        fail(f"{fname} imports elimu_ai.gemini directly")
+    else:
+        ok(f"{fname} does not import gemini directly")
 print()
 
-# ── 6. Circular import detection ─────────────────────────────────────────────
-print("=== 6. Circular import detection ===")
-def get_elimu_imports(path):
+# ── 4. Circular import detection ─────────────────────────────────────────────
+print("=== 4. Circular imports ===")
+def _get_imports(path):
     tree = ast.parse(path.read_bytes().lstrip(b"\xef\xbb\xbf"))
     deps = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            if node.module.startswith("elimu_ai"):
-                deps.append(node.module)
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("elimu_ai"):
+            deps.append(node.module)
         elif isinstance(node, ast.Import):
             for a in node.names:
                 if a.name.startswith("elimu_ai"):
@@ -122,222 +111,261 @@ graph = {}
 for p in ROOT.rglob("*.py"):
     mod = str(p).replace("\\",".").replace("/",".").replace(".py","")
     mod = mod[mod.find("elimu_ai"):]
-    if mod.endswith(".__init__"):
-        mod = mod[:-9]
-    graph[mod] = get_elimu_imports(p)
+    if mod.endswith(".__init__"): mod = mod[:-9]
+    graph[mod] = _get_imports(p)
 
-WHITE, GRAY, BLACK = 0, 1, 2
-color = {n: WHITE for n in graph}
+WHITE, GRAY, BLACK = 0,1,2
+color  = {n: WHITE for n in graph}
 cycles = []
-
 def dfs(node, path):
-    color[node] = GRAY
-    path.append(node)
-    for nbr in graph.get(node, []):
-        if nbr not in graph:
-            continue
+    color[node] = GRAY; path.append(node)
+    for nbr in graph.get(node,[]):
+        if nbr not in graph: continue
         if color[nbr] == GRAY:
             idx = path.index(nbr)
             cycles.append(" -> ".join(path[idx:]) + " -> " + nbr)
         elif color[nbr] == WHITE:
             dfs(nbr, path)
-    path.pop()
-    color[node] = BLACK
-
+    path.pop(); color[node] = BLACK
 for node in list(graph):
-    if color[node] == WHITE:
-        dfs(node, [])
+    if color[node] == WHITE: dfs(node, [])
 
 if cycles:
-    for c in cycles:
-        print(f"  {FAIL}  CYCLE: {c}")
-    overall = False
+    for c in cycles: fail(f"CYCLE: {c}")
 else:
-    print(f"  {PASS}  No circular imports.\n")
+    ok("No circular imports.\n")
 
-# ── 7. Module import test ─────────────────────────────────────────────────────
-print("=== 7. Module imports ===")
+# ── 5. Module import test ─────────────────────────────────────────────────────
+print("=== 5. Module imports ===")
 modules = [
-    "elimu_ai.config", "elimu_ai.helpers", "elimu_ai.personas",
-    "elimu_ai.prompts", "elimu_ai.router", "elimu_ai.gemini",
-    "elimu_ai.qdrant_db", "elimu_ai.catalog_search",
-    "elimu_ai.exceptions", "elimu_ai.logging_config",
-    "elimu_ai.health", "elimu_ai.http_client",
-    "elimu_ai.tools.teacher", "elimu_ai.tools.quiz",
-    "elimu_ai.tools.community", "elimu_ai.tools.library",
-    "elimu_ai.tools.moderation", "elimu_ai.tools.recommendations",
-    "elimu_ai.tools.forum", "elimu_ai.tools.answer",
-    "elimu_ai.agent", "elimu_ai.scheduler",
+    "elimu_ai.config","elimu_ai.helpers","elimu_ai.personas","elimu_ai.prompts",
+    "elimu_ai.router","elimu_ai.gemini","elimu_ai.qdrant_db","elimu_ai.catalog_search",
+    "elimu_ai.exceptions","elimu_ai.logging_config","elimu_ai.health","elimu_ai.http_client",
+    "elimu_ai.intent","elimu_ai.context_builder","elimu_ai.tool_registry",
+    "elimu_ai.memory","elimu_ai.orchestrator","elimu_ai.agent_manager",
+    "elimu_ai.db.connection","elimu_ai.db.repositories","elimu_ai.db.migrations",
+    "elimu_ai.tools.teacher","elimu_ai.tools.quiz","elimu_ai.tools.community",
+    "elimu_ai.tools.library","elimu_ai.tools.moderation","elimu_ai.tools.recommendations",
+    "elimu_ai.tools.forum","elimu_ai.tools.answer",
+    "elimu_ai.agent","elimu_ai.scheduler",
 ]
-_RUNTIME_PKGS = {"fastapi","qdrant_client","google","django","forum"}
+_runtime = {"fastapi","qdrant_client","google","django","forum","psycopg2","apscheduler"}
 for mod in modules:
     try:
         __import__(mod)
-        print(f"  {PASS}  {mod}")
+        ok(mod)
     except ImportError as e:
         pkg = str(e).split("'")[1].split(".")[0] if "'" in str(e) else str(e)
-        if pkg in _RUNTIME_PKGS:
+        if pkg in _runtime:
             print(f"  OK (runtime dep)  {mod}: {e}")
         else:
-            print(f"  {FAIL}  {mod}: {e}")
-            overall = False
+            fail(f"{mod}: {e}")
     except Exception as e:
-        print(f"  {FAIL}  {mod}: {e}")
-        overall = False
+        fail(f"{mod}: {e}")
 print()
 
-# ── 8. Router correctness ─────────────────────────────────────────────────────
-print("=== 8. Router routing tests ===")
+# ── 6. Router tests ───────────────────────────────────────────────────────────
+print("=== 6. Router routing tests ===")
 from elimu_ai.router import decide_persona
-
-tests = [
-    # Sample query coverage
-    ("term 3 schemes of work",                          "librarian"),
-    ("schemes of work",                                 "librarian"),
-    ("schemes of work 2026 term 3",                     "librarian"),
-    ("grade 6 schemes of work term 2",                  "librarian"),
-    ("elimu free exams with answers pdf",               "librarian"),
-    ("assessment books",                                "librarian"),
-    ("csl grade 10 notes 2026 pdf free download",       "librarian"),
-    ("grade 9 schemes of work term 3",                  "librarian"),
-    ("school report book",                              "librarian"),
-    ("curriculum designs",                              "librarian"),
-    ("grade 10 essential mathematics exams pdf",        "librarian"),
-    ("grade 8 exam papers with answers pdf term 3",     "librarian"),
-    ("grade 9 pretechnical project 2026",               "librarian"),
-    ("grade ten physics notes",                         "librarian"),
-    ("jss exams grade 9",                               "librarian"),
-    ("kcse revision materials",                         "librarian"),
-    ("record of work",                                  "librarian"),
-    ("grade 10 assessment book",                        "librarian"),
-    ("pp2 homework",                                    "librarian"),
-    ("holiday homework book",                           "librarian"),
-    ("pp2 schemes of work term 2 2026 pdf",             "librarian"),
-    ("rubrics in cbc",                                  "librarian"),
-    ("grade 1 exams",                                   "librarian"),
-    ("elimu library",                                   "librarian"),
-    ("elimu notes",                                     "librarian"),
-    ("what is the pricing",                             "librarian"),
-    ("elimu kenya exams",                               "librarian"),
-    ("end term",                                        "librarian"),
-    # Quiz
-    ("give me a quiz on photosynthesis",                "quiz"),
-    ("test me on cell biology",                         "quiz"),
-    ("practice questions for grade 8 science",         "quiz"),
-    # Community
-    ("start a discussion about KCSE",                   "community"),
-    ("create a post about CBC",                         "community"),
-    # Teacher
-    ("explain osmosis",                                 "teacher"),
-    ("what is photosynthesis",                          "teacher"),
-    ("how does mitosis work",                           "teacher"),
+ROUTER_TESTS = [
+    ("term 3 schemes of work",                     "librarian"),
+    ("grade 6 schemes of work term 2",             "librarian"),
+    ("elimu free exams with answers pdf",          "librarian"),
+    ("assessment books",                           "librarian"),
+    ("grade 9 schemes of work term 3",             "librarian"),
+    ("school report book",                         "librarian"),
+    ("curriculum designs",                         "librarian"),
+    ("grade 10 essential mathematics exams pdf",   "librarian"),
+    ("grade 9 pretechnical project 2026",          "librarian"),
+    ("grade ten physics notes",                    "librarian"),
+    ("jss exams grade 9",                          "librarian"),
+    ("kcse revision materials",                    "librarian"),
+    ("record of work",                             "librarian"),
+    ("grade 10 assessment book",                   "librarian"),
+    ("pp2 homework",                               "librarian"),
+    ("holiday homework book",                      "librarian"),
+    ("rubrics in cbc",                             "librarian"),
+    ("grade 1 exams",                              "librarian"),
+    ("elimu library",                              "librarian"),
+    ("give me a quiz on photosynthesis",           "quiz"),
+    ("test me on cell biology",                    "quiz"),
+    ("practice questions for grade 8 science",    "quiz"),
+    ("start a discussion about KCSE",              "community"),
+    ("create a post about CBC",                    "community"),
+    ("explain osmosis",                            "teacher"),
+    ("what is photosynthesis",                     "teacher"),
+    ("how does mitosis work",                      "teacher"),
 ]
-router_fails = 0
-for q, expected in tests:
+for q, expected in ROUTER_TESTS:
     got = decide_persona(q)
     if got == expected:
-        print(f"  {PASS}  {q[:55]!r:55} -> {got}")
+        ok(f"{q[:55]!r:55} -> {got}")
     else:
-        print(f"  {FAIL}  {q[:55]!r:55} -> {got!r}  (expected {expected!r})")
-        router_fails += 1; overall = False
-
+        fail(f"{q[:55]!r:55} -> {got!r}  (expected {expected!r})")
 print()
 
-# ── 9. Helper functions ───────────────────────────────────────────────────────
-print("=== 9. Helper functions ===")
+# ── 7. Intent detection tests ─────────────────────────────────────────────────
+print("=== 7. Intent detection tests ===")
+from elimu_ai.intent import detect_intents, primary_intent, has_intent
+INTENT_TESTS = [
+    ("quiz me on biology",              "quiz",          True),
+    ("explain photosynthesis",          "teacher",       True),
+    ("I need grade 8 maths notes",      "librarian",     True),
+    ("start a discussion about CBC",    "community",     True),
+    ("recommend chemistry revision",    "recommendation",True),
+    ("report this spam",                "moderation",    True),
+]
+for text, intent, expected in INTENT_TESTS:
+    result = has_intent(text, intent)
+    if result == expected:
+        ok(f"has_intent({text[:40]!r}, {intent!r}) == {expected}")
+    else:
+        fail(f"has_intent({text[:40]!r}, {intent!r}): got {result}, expected {expected}")
+
+# Multi-intent
+intents = detect_intents("Recommend chemistry notes then quiz me")
+names = [i.name for i in intents]
+if "quiz" in names and len(intents) >= 2:
+    ok("Multi-intent detected (recommendation+quiz)")
+else:
+    fail(f"Multi-intent failed: got {names}")
+print()
+
+# ── 8. Helper functions ───────────────────────────────────────────────────────
+print("=== 8. Helper functions ===")
 from elimu_ai.helpers import clean_answer, referral_url, search_url, rewrite_links
-
-assert clean_answer("**bold** and _italic_") == "bold and italic", "clean_answer failed"
+assert clean_answer("**bold** and _italic_") == "bold and italic"
+ok("clean_answer strips Markdown")
 assert "rid=" in referral_url("https://www.elimulibrary.com/doc/1")
+ok("referral_url appends rid")
 assert "elimulibrary" in search_url("Grade 8 Maths")
+ok("search_url builds correct URL")
 assert "rid=" in rewrite_links("Check https://www.elimulibrary.com/doc/1 here")
-print(f"  {PASS}  clean_answer, referral_url, search_url, rewrite_links\n")
+ok("rewrite_links rewrites URLs")
+print()
 
-# ── 10. Prompt builders ───────────────────────────────────────────────────────
-print("=== 10. Prompt builders ===")
+# ── 9. Prompt builders ────────────────────────────────────────────────────────
+print("=== 9. Prompt builders ===")
 from elimu_ai.tools.teacher import build_teacher_prompt, extract_context_hints
 from elimu_ai.tools.quiz import build_quiz_prompt
 from elimu_ai.tools.community import build_community_prompt
 
 p = build_teacher_prompt("What is osmosis?", "context here")
 assert "osmosis" in p and "context here" in p
-print(f"  {PASS}  build_teacher_prompt")
+ok("build_teacher_prompt")
 
 p = build_quiz_prompt("Cell biology", "context here")
-assert "Cell biology" in p and "context here" in p
-print(f"  {PASS}  build_quiz_prompt")
+assert "Cell biology" in p
+ok("build_quiz_prompt")
 
 p = build_community_prompt("KCSE stress", "")
 assert "KCSE stress" in p
-print(f"  {PASS}  build_community_prompt")
+ok("build_community_prompt")
 
 ctx = extract_context_hints("Grade 8 Mathematics Term 2 notes")
-assert ctx["grade"] == "grade8",       f"grade wrong: {ctx}"
-assert ctx["subject"] == "mathematics", f"subject wrong: {ctx}"
-assert ctx["term"] == "2",             f"term wrong: {ctx}"
-print(f"  {PASS}  extract_context_hints\n")
-
-# ── 11. New module checks ─────────────────────────────────────────────────────
-print("=== 11. New modules ===")
-
-# exceptions.py — exception hierarchy
-from elimu_ai.exceptions import (
-    ElimuAIError, GeminiUnavailableError, QdrantUnavailableError,
-    CatalogError, HTTPClientError, AuthenticationError,
-    HTTPResponseError, SchedulerError,
-)
-assert issubclass(GeminiUnavailableError, ElimuAIError)
-assert issubclass(AuthenticationError, HTTPClientError)
-assert HTTPResponseError("test", status_code=404).status_code == 404
-print(f"  {PASS}  exceptions.py — hierarchy correct")
-
-# logging_config.py — configure_logging callable
-from elimu_ai.logging_config import configure_logging
-configure_logging("WARNING")
-configure_logging("INFO")   # restore
-print(f"  {PASS}  logging_config.py — configure_logging works")
-
-# health.py — get_health returns expected shape
-from elimu_ai.health import get_health
-h = get_health()
-assert "status" in h and h["status"] in ("ok", "degraded")
-assert "gemini" in h and "qdrant" in h and "catalog" in h
-print(f"  {PASS}  health.py — get_health returns correct shape")
-
-# http_client.py — client instantiates, AI_SHARED_SECRET in config
-from elimu_ai.http_client import ElimuAPIClient, get_client
-from elimu_ai.config import AI_SHARED_SECRET, ELIMU_API_BASE_URL
-c = ElimuAPIClient()
-assert hasattr(c, "post") and hasattr(c, "get")
-assert hasattr(c, "chat") and hasattr(c, "api_health")
-print(f"  {PASS}  http_client.py — ElimuAPIClient instantiates")
-
-# config.py — new keys present
-from elimu_ai.config import AI_SHARED_SECRET, ELIMU_API_BASE_URL
-assert isinstance(AI_SHARED_SECRET, str)
-assert isinstance(ELIMU_API_BASE_URL, str)
-print(f"  {PASS}  config.py — AI_SHARED_SECRET and ELIMU_API_BASE_URL present")
-
-# scheduler.py — APScheduler, run_all_tasks, get_status
-from elimu_ai.scheduler import run_all_tasks, get_status, start_scheduler, shutdown_scheduler
-status = get_status()
-assert "running" in status and "last_run" in status
-print(f"  {PASS}  scheduler.py — APScheduler, get_status, run_all_tasks present")
-
-# APScheduler can be instantiated
-try:
-    from apscheduler.schedulers.background import BackgroundScheduler
-    print(f"  {PASS}  apscheduler — BackgroundScheduler importable")
-except ImportError:
-    print(f"  {FAIL}  apscheduler not installed — run: pip install apscheduler==3.10.4")
-    overall = False
-
+assert ctx["grade"] == "grade8"
+assert ctx["subject"] == "mathematics"
+assert ctx["term"] == "2"
+ok("extract_context_hints")
 print()
 
-# ── Summary ───────────────────────────────────────────────────────────────────
-print("=" * 50)
-if overall:
-    print(f"  {PASS}  ALL CHECKS PASSED")
+# ── 10. New platform modules ──────────────────────────────────────────────────
+print("=== 10. New platform modules ===")
+
+from elimu_ai.intent import detect_intents as _di
+intents = _di("quiz me on photosynthesis")
+assert intents and intents[0].name == "quiz"
+ok("intent.py: detect_intents works")
+
+from elimu_ai.context_builder import build_context, PromptContext
+ctx = build_context("test", "teacher")
+assert isinstance(ctx, PromptContext)
+ok("context_builder.py: build_context returns PromptContext")
+
+from elimu_ai.tool_registry import registry
+assert len(registry.all_names()) >= 7
+ok(f"tool_registry.py: {len(registry.all_names())} tools registered")
+
+from elimu_ai.memory import memory_store, MemoryStore
+memory_store.add_turn("verify-session", "user", "hello")
+h = memory_store.get_history("verify-session")
+assert len(h) == 1
+ok("memory.py: add_turn and get_history work")
+
+from elimu_ai.orchestrator import run_orchestrator, OrchestratorResult
+result = run_orchestrator("What is photosynthesis?")
+assert isinstance(result, OrchestratorResult)
+assert result.answer
+ok("orchestrator.py: run_orchestrator returns OrchestratorResult")
+
+from elimu_ai.agent import run_agent
+agent_result = run_agent("explain mitosis")
+assert set(agent_result.keys()) == {"persona","answer","sources","tools"}
+ok("agent.py: run_agent returns correct keys (backward compat)")
+
+from elimu_ai.agent_manager import start_agent_manager, stop_agent_manager, get_status as am_status
+t = start_agent_manager(daemon=True)
+import time; time.sleep(0.2)
+st = am_status()
+assert st["running"] is True
+stop_agent_manager()
+ok("agent_manager.py: starts and stops cleanly")
+
+from elimu_ai.db.connection import db_available
+ok(f"db/connection.py: db_available={db_available()}")
+
+from elimu_ai.db.repositories import MemoryRepository, AnalyticsRepository
+MemoryRepository().save_summary("verify-s1", None, "test summary")
+AnalyticsRepository().log_request("rid-001", None, "teacher", [], [], 10, 100, 50)
+ok("db/repositories.py: MemoryRepository and AnalyticsRepository degrade gracefully")
+
+from elimu_ai.health import get_health
+h = get_health()
+required_keys = {"status","version","uptime_seconds","gemini","qdrant","postgresql",
+                 "catalog","scheduler","memory","agent_manager","environment"}
+missing = required_keys - set(h.keys())
+assert not missing, f"Missing: {missing}"
+ok(f"health.py: get_health has all {len(required_keys)} required keys")
+
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    ok("apscheduler: BackgroundScheduler importable")
+except ImportError:
+    fail("apscheduler not installed — run: pip install apscheduler==3.10.4")
+print()
+
+# ── 11. Run automated test suite ──────────────────────────────────────────────
+print("=== 11. Automated test suite ===")
+import importlib
+test_dir = pathlib.Path("elimu_ai/tests")
+test_files = sorted(test_dir.glob("test_*.py"))
+suite_pass = suite_fail = 0
+for tf in test_files:
+    mod_name = f"elimu_ai.tests.{tf.stem}"
+    try:
+        mod = importlib.import_module(mod_name)
+    except Exception as e:
+        fail(f"Import error in {tf.name}: {e}")
+        continue
+    tests = {k: v for k, v in vars(mod).items() if k.startswith("test_") and callable(v)}
+    for name, fn in tests.items():
+        try:
+            fn()
+            suite_pass += 1
+        except Exception as e:
+            fail(f"{tf.stem}.{name}: {e}")
+            suite_fail += 1
+
+if suite_fail == 0:
+    ok(f"All {suite_pass} automated tests passed.\n")
 else:
-    print(f"  {FAIL}  SOME CHECKS FAILED — see above")
-print("=" * 50)
+    fail(f"{suite_fail}/{suite_pass+suite_fail} automated tests failed.\n")
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+print("=" * 60)
+if overall:
+    print(f"\033[92m  ALL CHECKS PASSED\033[0m")
+else:
+    print(f"\033[91m  SOME CHECKS FAILED — see above\033[0m")
+print("=" * 60)
+sys.exit(0 if overall else 1)

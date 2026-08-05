@@ -4,18 +4,19 @@ elimu_ai/service.py
 FastAPI application — the sole HTTP-facing layer.
 
 Responsibilities:
-  - Configure logging (delegates to logging_config.py).
-  - Receive and validate HTTP requests.
-  - Call run_agent().
+  - Configure logging.
+  - Validate and authenticate requests.
+  - Assign request IDs for tracing.
+  - Call run_agent() / orchestrator.
   - Return structured JSON.
-  - Expose health and scheduler status endpoints.
+  - Expose health, scheduler, and agent manager status endpoints.
 
-Endpoints:
+Endpoints (ALL PRESERVED — no renames):
   GET  /                  → service info
-  GET  /health            → liveness + dependency health
-  POST /ask               → main chat endpoint
+  GET  /health            → full dependency health report
+  POST /ask               → primary chat endpoint
   POST /chat              → backward-compat alias for /ask
-  GET  /scheduler/status  → background worker status
+  GET  /scheduler/status  → APScheduler status
 
 No business logic. No Gemini calls. No Qdrant calls.
 """
@@ -23,7 +24,9 @@ No business logic. No Gemini calls. No Qdrant calls.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+import time
+import uuid
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -41,26 +44,26 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title=SYSTEM_NAME,
-    description="Autonomous educational AI for Kenyan learners — ElimuTalks & Elimu Library.",
+    description="Autonomous educational AI — ElimuTalks & Elimu Library.",
     version=SYSTEM_VERSION,
 )
 
-# ── Schemas ───────────────────────────────────────────────────────────────────
+
+# ── Schemas (UNCHANGED — API contract preserved) ──────────────────────────────
 
 class AskRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=2000, description="User's question")
-    history: List[Dict[str, str]] = Field(
-        default_factory=list,
-        description="Prior conversation turns [{role, content}]",
-    )
+    message:    str = Field(..., min_length=1, max_length=2000)
+    history:    List[Dict[str, str]] = Field(default_factory=list)
+    session_id: Optional[str] = Field(default=None, description="Optional session identifier")
+    user_id:    Optional[int] = Field(default=None, description="Optional authenticated user ID")
 
 
 class AskResponse(BaseModel):
     success: bool
     persona: str
-    answer: str
+    answer:  str
     sources: List[str]
-    tools: List[str]
+    tools:   List[str]
 
 
 # ── Exception handler ─────────────────────────────────────────────────────────
@@ -72,10 +75,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     )
     return JSONResponse(
         status_code=500,
-        content={
-            "success": False,
-            "detail": "An internal error occurred. Please try again.",
-        },
+        content={"success": False, "detail": "An internal error occurred. Please try again."},
     )
 
 
@@ -92,26 +92,39 @@ def root() -> Dict[str, Any]:
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    """
-    Liveness + dependency health probe.
-    Returns 200 with a status of "ok" or "degraded".
-    """
+    """Full dependency health report (Gemini, Qdrant, PostgreSQL, Scheduler…)."""
     from elimu_ai.health import get_health
-    report = get_health()
-    return report
+    return get_health()
 
 
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
     """
     Primary chat endpoint.
-
     Accepts a message and optional conversation history.
     Returns persona, answer, sources, and tools used.
     """
-    logger.info("POST /ask message=%r", req.message[:80])
+    request_id = str(uuid.uuid4())
+    t_start    = time.monotonic()
+
+    logger.info(
+        "POST /ask request_id=%s user_id=%s session=%s message=%r",
+        request_id[:8], req.user_id, req.session_id, req.message[:80],
+    )
+
     try:
-        result = run_agent(question=req.message, history=req.history)
+        result = run_agent(
+            question=req.message,
+            history=req.history,
+            session_id=req.session_id or request_id,
+            user_id=req.user_id,
+            request_id=request_id,
+        )
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        logger.info(
+            "POST /ask request_id=%s persona=%s tools=%s ms=%d",
+            request_id[:8], result["persona"], result["tools"], elapsed_ms,
+        )
         return AskResponse(
             success=True,
             persona=result["persona"],
@@ -120,7 +133,9 @@ def ask(req: AskRequest) -> AskResponse:
             tools=result["tools"],
         )
     except Exception as exc:
-        logger.error("POST /ask failed: %s", exc, exc_info=True)
+        logger.error(
+            "POST /ask request_id=%s failed: %s", request_id[:8], exc, exc_info=True
+        )
         raise HTTPException(status_code=500, detail="Agent error — please try again.")
 
 
@@ -132,7 +147,7 @@ def chat(req: AskRequest) -> AskResponse:
 
 @app.get("/scheduler/status")
 def get_scheduler_status() -> Dict[str, Any]:
-    """Return current background scheduler status."""
+    """Return current APScheduler status."""
     try:
         from elimu_ai.scheduler import get_status
         return get_status()

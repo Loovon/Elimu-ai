@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -184,26 +185,43 @@ _TASK_REGISTRY: List[Tuple[str, Callable[[], str], int]] = [
 def _make_job(name: str, fn: Callable[[], str]) -> Callable[[], None]:
     """
     Wrap a task function so APScheduler can call it.
-    Updates scheduler_status with the result of each run.
+    Updates scheduler_status with the result and logs to DB.
     """
     def job() -> None:
         logger.debug("scheduler: starting task %r", name)
+        t_start = time.monotonic()
         try:
             result = fn()
         except Exception as exc:
             result = f"Error: {exc}"
             logger.error("scheduler: task %r raised: %s", name, exc)
 
+        duration_ms = int((time.monotonic() - t_start) * 1000)
         now = datetime.now(tz=timezone.utc).isoformat()
-        scheduler_status["last_run"][name] = {"at": now, "result": result}
         is_error = result.startswith("Error:")
+
+        # Update in-memory status
+        scheduler_status["last_run"][name] = {"at": now, "result": result}
         if is_error:
             scheduler_status["errors"][name] = {"at": now, "detail": result}
         else:
             scheduler_status["errors"].pop(name, None)
 
         log = logger.error if is_error else logger.info
-        log("scheduler [%s]: %s", name, result)
+        log("scheduler [%s]: %s (duration=%dms)", name, result, duration_ms)
+
+        # Persist to DB (non-blocking, non-fatal)
+        try:
+            from elimu_ai.db.repositories import SchedulerRepository
+            SchedulerRepository().log_job(
+                job_name=name,
+                status="error" if is_error else "ok",
+                result=result,
+                duration_ms=duration_ms,
+                error=result if is_error else None,
+            )
+        except Exception as db_exc:
+            logger.debug("scheduler: DB log failed (non-fatal): %s", db_exc)
 
     job.__name__ = f"task_{name}"
     return job
