@@ -1,70 +1,41 @@
 """
 elimu_ai/service.py
 
-FastAPI application — the only HTTP-facing layer.
+FastAPI application — the sole HTTP-facing layer.
 
 Responsibilities:
-  - Configure logging for the entire application.
+  - Configure logging (delegates to logging_config.py).
   - Receive and validate HTTP requests.
   - Call run_agent().
   - Return structured JSON.
+  - Expose health and scheduler status endpoints.
 
 Endpoints:
-  GET  /           → service info
-  GET  /health     → liveness check
-  POST /ask        → main chat endpoint  (primary)
-  POST /chat       → alias for /ask      (backward compat)
-  GET  /scheduler/status → background worker status
+  GET  /                  → service info
+  GET  /health            → liveness + dependency health
+  POST /ask               → main chat endpoint
+  POST /chat              → backward-compat alias for /ask
+  GET  /scheduler/status  → background worker status
 
-No business logic, no Gemini calls, no Qdrant calls live here.
+No business logic. No Gemini calls. No Qdrant calls.
 """
 
 from __future__ import annotations
 
 import logging
-import logging.config
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from elimu_ai.agent import run_agent
-from elimu_ai.config import LOG_LEVEL, SYSTEM_NAME, SYSTEM_VERSION
+from elimu_ai.config import SYSTEM_NAME, SYSTEM_VERSION
+from elimu_ai.logging_config import configure_logging
 
-# ── Logging configuration ─────────────────────────────────────────────────────
-
-logging.config.dictConfig({
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {
-        "standard": {
-            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            "datefmt": "%Y-%m-%d %H:%M:%S",
-        },
-    },
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "formatter": "standard",
-        },
-    },
-    "root": {
-        "level": LOG_LEVEL,
-        "handlers": ["console"],
-    },
-})
-
+# Configure logging once, before anything else logs
+configure_logging()
 logger = logging.getLogger(__name__)
-
-# ── Scheduler state (shared with /scheduler/status) ──────────────────────────
-# Populated by scheduler.py when it runs as a background thread.
-scheduler_status: Dict[str, Any] = {
-    "running": False,
-    "started_at": None,
-    "last_run": {},
-}
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
@@ -73,7 +44,6 @@ app = FastAPI(
     description="Autonomous educational AI for Kenyan learners — ElimuTalks & Elimu Library.",
     version=SYSTEM_VERSION,
 )
-
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -97,10 +67,15 @@ class AskResponse(BaseModel):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.error("Unhandled exception on %s: %s", request.url.path, exc, exc_info=True)
+    logger.error(
+        "Unhandled exception on %s: %s", request.url.path, exc, exc_info=True
+    )
     return JSONResponse(
         status_code=500,
-        content={"success": False, "detail": "An internal error occurred. Please try again."},
+        content={
+            "success": False,
+            "detail": "An internal error occurred. Please try again.",
+        },
     )
 
 
@@ -109,24 +84,30 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {
-        "status": "running",
+        "status":  "running",
         "service": SYSTEM_NAME,
         "version": SYSTEM_VERSION,
     }
 
 
 @app.get("/health")
-def health() -> Dict[str, str]:
-    """Liveness probe — returns 200 OK if the service is up."""
-    return {"status": "ok"}
+def health() -> Dict[str, Any]:
+    """
+    Liveness + dependency health probe.
+    Returns 200 with a status of "ok" or "degraded".
+    """
+    from elimu_ai.health import get_health
+    report = get_health()
+    return report
 
 
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
     """
     Primary chat endpoint.
+
     Accepts a message and optional conversation history.
-    Returns the agent's response with persona, answer, sources, and tools used.
+    Returns persona, answer, sources, and tools used.
     """
     logger.info("POST /ask message=%r", req.message[:80])
     try:
@@ -152,8 +133,9 @@ def chat(req: AskRequest) -> AskResponse:
 @app.get("/scheduler/status")
 def get_scheduler_status() -> Dict[str, Any]:
     """Return current background scheduler status."""
-    return {
-        "running":    scheduler_status["running"],
-        "started_at": scheduler_status["started_at"],
-        "last_run":   scheduler_status["last_run"],
-    }
+    try:
+        from elimu_ai.scheduler import get_status
+        return get_status()
+    except Exception as exc:
+        logger.warning("Could not read scheduler status: %s", exc)
+        return {"running": False, "started_at": None, "last_run": {}, "errors": {}}

@@ -35,5 +35,14 @@ SCHEDULER_RECOMMEND_INTERVAL: int = int(os.getenv("SCHEDULER_RECOMMEND_INTERVAL"
 SCHEDULER_MODERATE_INTERVAL: int  = int(os.getenv("SCHEDULER_MODERATE_INTERVAL",  "900"))    # 15 min
 SCHEDULER_CATALOG_INTERVAL: int   = int(os.getenv("SCHEDULER_CATALOG_INTERVAL",   "43200"))  # 12 hr
 
+# ── Django API integration ────────────────────────────────────────────────────
+# Base URL of the ElimuTalks Django REST API.
+# Used by http_client.py for all outbound requests.
+ELIMU_API_BASE_URL: str = os.getenv("ELIMU_API_BASE_URL", "")
+
+# Shared secret for AI ↔ Django authentication.
+# Every outbound request carries:  Authorization: Bearer <AI_SHARED_SECRET>
+AI_SHARED_SECRET: str = os.getenv("AI_SHARED_SECRET", "")
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

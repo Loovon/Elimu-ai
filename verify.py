@@ -161,6 +161,8 @@ modules = [
     "elimu_ai.config", "elimu_ai.helpers", "elimu_ai.personas",
     "elimu_ai.prompts", "elimu_ai.router", "elimu_ai.gemini",
     "elimu_ai.qdrant_db", "elimu_ai.catalog_search",
+    "elimu_ai.exceptions", "elimu_ai.logging_config",
+    "elimu_ai.health", "elimu_ai.http_client",
     "elimu_ai.tools.teacher", "elimu_ai.tools.quiz",
     "elimu_ai.tools.community", "elimu_ai.tools.library",
     "elimu_ai.tools.moderation", "elimu_ai.tools.recommendations",
@@ -274,6 +276,63 @@ assert ctx["grade"] == "grade8",       f"grade wrong: {ctx}"
 assert ctx["subject"] == "mathematics", f"subject wrong: {ctx}"
 assert ctx["term"] == "2",             f"term wrong: {ctx}"
 print(f"  {PASS}  extract_context_hints\n")
+
+# ── 11. New module checks ─────────────────────────────────────────────────────
+print("=== 11. New modules ===")
+
+# exceptions.py — exception hierarchy
+from elimu_ai.exceptions import (
+    ElimuAIError, GeminiUnavailableError, QdrantUnavailableError,
+    CatalogError, HTTPClientError, AuthenticationError,
+    HTTPResponseError, SchedulerError,
+)
+assert issubclass(GeminiUnavailableError, ElimuAIError)
+assert issubclass(AuthenticationError, HTTPClientError)
+assert HTTPResponseError("test", status_code=404).status_code == 404
+print(f"  {PASS}  exceptions.py — hierarchy correct")
+
+# logging_config.py — configure_logging callable
+from elimu_ai.logging_config import configure_logging
+configure_logging("WARNING")
+configure_logging("INFO")   # restore
+print(f"  {PASS}  logging_config.py — configure_logging works")
+
+# health.py — get_health returns expected shape
+from elimu_ai.health import get_health
+h = get_health()
+assert "status" in h and h["status"] in ("ok", "degraded")
+assert "gemini" in h and "qdrant" in h and "catalog" in h
+print(f"  {PASS}  health.py — get_health returns correct shape")
+
+# http_client.py — client instantiates, AI_SHARED_SECRET in config
+from elimu_ai.http_client import ElimuAPIClient, get_client
+from elimu_ai.config import AI_SHARED_SECRET, ELIMU_API_BASE_URL
+c = ElimuAPIClient()
+assert hasattr(c, "post") and hasattr(c, "get")
+assert hasattr(c, "chat") and hasattr(c, "api_health")
+print(f"  {PASS}  http_client.py — ElimuAPIClient instantiates")
+
+# config.py — new keys present
+from elimu_ai.config import AI_SHARED_SECRET, ELIMU_API_BASE_URL
+assert isinstance(AI_SHARED_SECRET, str)
+assert isinstance(ELIMU_API_BASE_URL, str)
+print(f"  {PASS}  config.py — AI_SHARED_SECRET and ELIMU_API_BASE_URL present")
+
+# scheduler.py — APScheduler, run_all_tasks, get_status
+from elimu_ai.scheduler import run_all_tasks, get_status, start_scheduler, shutdown_scheduler
+status = get_status()
+assert "running" in status and "last_run" in status
+print(f"  {PASS}  scheduler.py — APScheduler, get_status, run_all_tasks present")
+
+# APScheduler can be instantiated
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    print(f"  {PASS}  apscheduler — BackgroundScheduler importable")
+except ImportError:
+    print(f"  {FAIL}  apscheduler not installed — run: pip install apscheduler==3.10.4")
+    overall = False
+
+print()
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print("=" * 50)
