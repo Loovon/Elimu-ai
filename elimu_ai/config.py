@@ -13,8 +13,8 @@ import os
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-LLM_MODEL: str      = os.getenv("LLM_MODEL", "gemini-2.5-flash")
-EMBED_MODEL: str    = os.getenv("EMBED_MODEL", "text-embedding-004")
+LLM_MODEL: str      = os.getenv("LLM_MODEL", "gemini-flash-latest")
+EMBED_MODEL: str    = os.getenv("EMBED_MODEL", "gemini-embedding-001")
 
 # ── Qdrant ────────────────────────────────────────────────────────────────────
 QDRANT_URL: str     = os.getenv("QDRANT_URL", "")
