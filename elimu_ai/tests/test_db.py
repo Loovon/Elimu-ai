@@ -1,6 +1,6 @@
 """Tests for DB connection and repositories (graceful degradation when no DB)."""
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
 from elimu_ai.db.connection import db_available
 from elimu_ai.db.repositories import (

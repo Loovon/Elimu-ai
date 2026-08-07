@@ -1,6 +1,6 @@
 """Tests for the backward-compatible run_agent() API."""
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
 from elimu_ai.agent import run_agent
 

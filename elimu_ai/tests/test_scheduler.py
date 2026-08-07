@@ -1,6 +1,6 @@
 """Tests for the APScheduler-based scheduler."""
 import sys, pathlib, time
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
 from elimu_ai.scheduler import (
     start_scheduler, shutdown_scheduler, get_status,

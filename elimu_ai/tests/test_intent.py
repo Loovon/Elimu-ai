@@ -1,6 +1,6 @@
 """Tests for multi-intent detection."""
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
 from elimu_ai.intent import detect_intents, primary_intent, has_intent, intent_names
 

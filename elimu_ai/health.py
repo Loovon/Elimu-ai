@@ -43,14 +43,31 @@ def check_gemini() -> Dict[str, Any]:
 
 
 def check_qdrant() -> Dict[str, Any]:
-    from elimu_ai.config import QDRANT_URL, COLLECTION_NAME
+    from elimu_ai.config import QDRANT_URL, COLLECTION_NAME, EMBED_DIM
     if not QDRANT_URL:
         return {"status": "degraded", "detail": "QDRANT_URL not set"}
-    from elimu_ai.qdrant_db import _get_client
+    from elimu_ai.qdrant_db import _get_client, get_collection_info
     client = _get_client()
     if client is None:
         return {"status": "degraded", "detail": "client init failed"}
-    return {"status": "ok", "collection": COLLECTION_NAME}
+    # Verify collection dimension
+    info = get_collection_info(COLLECTION_NAME)
+    vec_size = info.get("vector_size")
+    if vec_size is not None and vec_size != EMBED_DIM:
+        return {
+            "status":  "degraded",
+            "detail":  f"Collection vector_size={vec_size} but EMBED_DIM={EMBED_DIM}. Rebuild required.",
+            "collection": COLLECTION_NAME,
+            "vector_size": vec_size,
+            "expected": EMBED_DIM,
+        }
+    return {
+        "status":       "ok",
+        "collection":   COLLECTION_NAME,
+        "vector_size":  vec_size,
+        "points_count": info.get("points_count"),
+        "col_status":   info.get("status"),
+    }
 
 
 def check_postgresql() -> Dict[str, Any]:

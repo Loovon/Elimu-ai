@@ -1,6 +1,6 @@
 """Tests for PromptContext assembly."""
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
 from elimu_ai.context_builder import build_context, PromptContext, _trim_history
 
