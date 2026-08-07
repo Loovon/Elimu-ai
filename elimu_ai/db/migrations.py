@@ -1,16 +1,12 @@
 """
 elimu_ai/db/migrations.py
 
-Database schema initialisation for the Elimu AI tables.
+Complete database schema for the Elimu AI autonomous platform.
+All tables prefixed with ai_ to avoid collisions with Django models.
 
-Run once at deployment:
+Run:
     from elimu_ai.db.migrations import run_migrations
     run_migrations()
-
-Or via management command:
-    python -c "from elimu_ai.db.migrations import run_migrations; run_migrations()"
-
-All tables are prefixed with `ai_` to avoid collisions with Django models.
 """
 
 from __future__ import annotations
@@ -29,6 +25,7 @@ CREATE TABLE IF NOT EXISTS ai_memory_summary (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_memory_user ON ai_memory_summary(user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_session ON ai_memory_summary(session_id);
 
 -- Request/response analytics
 CREATE TABLE IF NOT EXISTS ai_analytics_log (
@@ -45,7 +42,7 @@ CREATE TABLE IF NOT EXISTS ai_analytics_log (
     had_error    BOOLEAN DEFAULT FALSE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_analytics_user   ON ai_analytics_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_analytics_user    ON ai_analytics_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_persona ON ai_analytics_log(persona);
 CREATE INDEX IF NOT EXISTS idx_analytics_created ON ai_analytics_log(created_at);
 
@@ -90,6 +87,144 @@ CREATE TABLE IF NOT EXISTS ai_recommendation_log (
 );
 CREATE INDEX IF NOT EXISTS idx_rec_user    ON ai_recommendation_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_rec_subject ON ai_recommendation_log(subject);
+
+-- Agent decision logs (every supervisor decision)
+CREATE TABLE IF NOT EXISTS ai_agent_decisions (
+    id           SERIAL PRIMARY KEY,
+    request_id   VARCHAR(64),
+    session_id   VARCHAR(128),
+    user_id      INTEGER,
+    question     TEXT,
+    intents      JSONB,
+    plan_steps   JSONB,
+    tools_used   JSONB,
+    persona      VARCHAR(32),
+    confidence   FLOAT,
+    execution_ms INTEGER,
+    had_error    BOOLEAN DEFAULT FALSE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_request ON ai_agent_decisions(request_id);
+CREATE INDEX IF NOT EXISTS idx_decisions_created ON ai_agent_decisions(created_at);
+
+-- Successful query log
+CREATE TABLE IF NOT EXISTS ai_successful_queries (
+    id           SERIAL PRIMARY KEY,
+    question     TEXT NOT NULL,
+    intents      JSONB,
+    tools_used   JSONB,
+    persona      VARCHAR(32),
+    execution_ms INTEGER,
+    user_id      INTEGER,
+    session_id   VARCHAR(128),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_success_created ON ai_successful_queries(created_at);
+
+-- Failed query log
+CREATE TABLE IF NOT EXISTS ai_failed_queries (
+    id             SERIAL PRIMARY KEY,
+    question       TEXT NOT NULL,
+    intents        JSONB,
+    tools_used     JSONB,
+    failure_reason TEXT,
+    stack_trace    TEXT,
+    confidence     FLOAT,
+    user_id        INTEGER,
+    session_id     VARCHAR(128),
+    suggested_fix  TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_failed_created ON ai_failed_queries(created_at);
+
+-- Intent history (for routing improvement)
+CREATE TABLE IF NOT EXISTS ai_intent_history (
+    id          SERIAL PRIMARY KEY,
+    question    TEXT NOT NULL,
+    detected    JSONB,
+    primary_int VARCHAR(32),
+    used_gemini BOOLEAN DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_intent_primary ON ai_intent_history(primary_int);
+
+-- Hallucination log
+CREATE TABLE IF NOT EXISTS ai_hallucinations (
+    id         SERIAL PRIMARY KEY,
+    question   TEXT,
+    answer     TEXT,
+    issues     JSONB,
+    confidence FLOAT,
+    user_id    INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Response quality log
+CREATE TABLE IF NOT EXISTS ai_response_quality (
+    id           SERIAL PRIMARY KEY,
+    request_id   VARCHAR(64),
+    confidence   FLOAT,
+    issues       JSONB,
+    passed       BOOLEAN,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- User preferences / interests
+CREATE TABLE IF NOT EXISTS ai_user_preferences (
+    id               SERIAL PRIMARY KEY,
+    user_id          INTEGER UNIQUE NOT NULL,
+    preferred_grades JSONB,
+    preferred_subj   JSONB,
+    frequent_searches JSONB,
+    last_seen        TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_prefs_user ON ai_user_preferences(user_id);
+
+-- Background task log
+CREATE TABLE IF NOT EXISTS ai_background_tasks (
+    id           SERIAL PRIMARY KEY,
+    task_name    VARCHAR(64) NOT NULL,
+    status       VARCHAR(16) NOT NULL,
+    started_at   TIMESTAMPTZ,
+    finished_at  TIMESTAMPTZ,
+    duration_ms  INTEGER,
+    result       TEXT,
+    error        TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Email alert log
+CREATE TABLE IF NOT EXISTS ai_email_notifications (
+    id             SERIAL PRIMARY KEY,
+    alert_type     VARCHAR(64),
+    subject        TEXT,
+    body           TEXT,
+    traceback_text TEXT,
+    suggested_fix  TEXT,
+    sent_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Health reports
+CREATE TABLE IF NOT EXISTS ai_health_reports (
+    id           SERIAL PRIMARY KEY,
+    status       VARCHAR(16),
+    report       JSONB,
+    reported_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Recommendation cache (for frequently requested materials)
+CREATE TABLE IF NOT EXISTS ai_recommendation_cache (
+    id          SERIAL PRIMARY KEY,
+    cache_key   VARCHAR(256) UNIQUE NOT NULL,
+    result_json TEXT NOT NULL,
+    hit_count   INTEGER DEFAULT 0,
+    expires_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cache_key ON ai_recommendation_cache(cache_key);
+CREATE INDEX IF NOT EXISTS idx_cache_exp ON ai_recommendation_cache(expires_at);
 """
 
 
@@ -97,6 +232,7 @@ def run_migrations() -> bool:
     """
     Create all AI tables if they don't exist.
     Returns True on success, False on failure.
+    Idempotent — safe to run multiple times.
     """
     try:
         from elimu_ai.db.connection import get_connection, db_available

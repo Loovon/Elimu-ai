@@ -1,24 +1,10 @@
 """
 elimu_ai/agent.py
 
-Agent entry point — backward-compatible orchestration facade.
-
-The public API surface (run_agent) is UNCHANGED.
-Internally it delegates to the Orchestrator, which supports:
-  - multi-intent detection
-  - tool registry execution plans
-  - sequential tool chaining
-  - context building
-  - memory and analytics
-
-Existing callers (service.py, main.py) require no changes.
-The response dict shape is preserved exactly:
-    {
-        "persona":  str,
-        "answer":   str,
-        "sources":  list[str],
-        "tools":    list[str],
-    }
+Backward-compatible entry point.
+Delegates to the SupervisorAgent when available,
+falls back to the original orchestrator on any import failure.
+Response shape is UNCHANGED: {persona, answer, sources, tools}
 """
 
 from __future__ import annotations
@@ -37,35 +23,41 @@ def run_agent(
     request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Execute the autonomous agent pipeline for a single user request.
+    Execute the autonomous agent pipeline.
 
-    Parameters
-    ----------
-    question : str
-        The user's message.
-    history : list of {role: str, content: str}, optional
-        Prior conversation turns for context.
-    session_id : str, optional
-        Session identifier for memory / analytics.
-    user_id : int, optional
-        Authenticated user ID for personalisation and analytics.
-    request_id : str, optional
-        Unique trace ID (auto-generated if not provided).
-
-    Returns
-    -------
-    dict — UNCHANGED from previous versions:
-        persona  : str         — primary persona / intent name
-        answer   : str         — clean plain-text response
-        sources  : list[str]   — referral-tagged Qdrant source URLs
-        tools    : list[str]   — tools invoked during this request
+    Returns the exact same dict shape as all previous versions:
+        persona  : str
+        answer   : str
+        sources  : list[str]
+        tools    : list[str]
     """
-    from elimu_ai.orchestrator import run_orchestrator
-
-    # Coerce None to empty string so the orchestrator's guard handles it
     if question is None:
         question = ""
 
+    # ── Try SupervisorAgent first ─────────────────────────────────────────
+    try:
+        from elimu_ai.agents.supervisor import SupervisorAgent
+        supervisor = SupervisorAgent()
+        result = supervisor.run(
+            question=question,
+            history=history or [],
+            session_id=session_id,
+            user_id=user_id,
+            request_id=request_id,
+        )
+        return {
+            "persona": result.persona,
+            "answer":  result.answer,
+            "sources": result.sources,
+            "tools":   result.tools_used,
+        }
+    except Exception as exc:
+        logger.warning(
+            "SupervisorAgent failed (%s) — falling back to orchestrator", exc
+        )
+
+    # ── Fallback to orchestrator ──────────────────────────────────────────
+    from elimu_ai.orchestrator import run_orchestrator
     result = run_orchestrator(
         question=question,
         history=history or [],
@@ -73,8 +65,6 @@ def run_agent(
         user_id=user_id,
         request_id=request_id,
     )
-
-    # Return the exact same dict shape that service.py and main.py expect
     return {
         "persona": result.persona,
         "answer":  result.answer,

@@ -98,7 +98,8 @@ print("=== 4. Circular imports ===")
 def _get_imports(path):
     tree = ast.parse(path.read_bytes().lstrip(b"\xef\xbb\xbf"))
     deps = []
-    for node in ast.walk(tree):
+    # Only walk TOP-LEVEL import statements, not those inside functions/classes
+    for node in tree.body:
         if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("elimu_ai"):
             deps.append(node.module)
         elif isinstance(node, ast.Import):
