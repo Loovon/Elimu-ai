@@ -16,7 +16,7 @@ except ImportError:
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-LLM_MODEL: str      = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+LLM_MODEL: str      = os.getenv("LLM_MODEL", "gemini-3.6-flash")
 EMBED_MODEL: str    = os.getenv("EMBED_MODEL", "gemini-embedding-001")
 EMBED_DIM: int      = int(os.getenv("EMBED_DIM", "768"))   # canonical embedding dimension
 
