@@ -1,0 +1,30 @@
+[Unit]
+Description=Elimu AI Background Worker
+Documentation=https://github.com/Loovon/Elimu-ai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=elimuai
+Group=elimuai
+WorkingDirectory=/home/elimuai/elimu-ai
+EnvironmentFile=/etc/elimu-ai/worker.env
+ExecStart=/home/elimuai/elimu-ai/venv/bin/python -m elimu_ai.worker
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/elimuai/elimu-ai
+
+# Logging to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=elimu-ai-worker
+
+[Install]
+WantedBy=multi-user.target

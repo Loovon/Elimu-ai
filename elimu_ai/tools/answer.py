@@ -1,54 +1,69 @@
 """
 elimu_ai/tools/answer.py
 
-Background answer bot — auto-answers unanswered forum threads.
-Responsibilities:
-  - unanswered_threads()         → QuerySet
-  - answer_unanswered_threads()  → int  (threads answered)
+Background answer bot — NO Django ORM.
+All forum operations go through ElimuAPIClient HTTP calls.
 
-Requires Django to be configured.
+Idempotency: each answer carry a stable key (ai-forum-answer-{thread_id})
+so retrying after a network failure never posts duplicate answers.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 
 
-def unanswered_threads():
-    """Return threads older than 3 hours that have received no replies."""
-    from django.utils import timezone
-    from forum.models import Thread
-    cutoff = timezone.now() - timedelta(hours=3)
-    return Thread.objects.filter(created_at__lt=cutoff)
+def unanswered_threads() -> List[Dict]:
+    """
+    Fetch unanswered threads from Django via HTTP.
+    Returns a list of thread dicts, or [] when Django is unavailable.
+    """
+    from elimu_ai.tools.forum import get_unanswered_threads
+    return get_unanswered_threads(cutoff_hours=3)
 
 
 def answer_unanswered_threads() -> int:
     """
-    Post AI-generated answers to threads that have only the opening post.
-    Returns the count of threads answered.
+    Iterate unanswered threads, generate AI answers, post via HTTP.
+    Returns the number of threads successfully answered.
+    Idempotency-Key prevents duplicate posts on retry.
     """
-    from django.contrib.auth.models import User
-    from forum.models import Post
-    from elimu_ai.personas import TEACHER
     from elimu_ai.tools.library import find_materials
+    from elimu_ai.tools.forum import post_ai_answer
 
-    ai_user, _ = User.objects.get_or_create(
-        username=TEACHER,
-        defaults={"email": "teacherai@elimutalks.ai", "is_active": True},
-    )
+    threads = unanswered_threads()
+    if not threads:
+        logger.debug("answer: no unanswered threads.")
+        return 0
 
     count = 0
-    for thread in unanswered_threads():
-        if thread.posts.count() == 1:
-            try:
-                answer = find_materials(thread.title)
-                Post.objects.create(thread=thread, author=ai_user, content=answer)
+    for thread in threads:
+        thread_id = thread.get("id")
+        title     = thread.get("title", "")
+        if not thread_id or not title:
+            continue
+
+        # Only answer threads with exactly 1 post (the opening post)
+        post_count = thread.get("post_count", thread.get("posts_count", 0))
+        if post_count != 1:
+            continue
+
+        try:
+            content = find_materials(title)
+            if not content:
+                continue
+            ok = post_ai_answer(
+                thread_id=thread_id,
+                content=content,
+                idempotency_key=f"ai-forum-answer-{thread_id}",
+            )
+            if ok:
                 count += 1
-                logger.debug("answer: replied to thread %r", thread.title[:60])
-            except Exception as exc:
-                logger.error("answer: failed to reply to thread %d: %s", thread.pk, exc)
+                logger.debug("answer: replied to thread %d %r", thread_id, title[:60])
+        except Exception as exc:
+            logger.error("answer: failed on thread %d: %s", thread_id, exc)
 
     return count

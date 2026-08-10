@@ -1,6 +1,9 @@
 """
-elimu_ai/scheduler.py  —  Autonomous background scheduler (APScheduler 3.x).
-Extended with 20+ background tasks.  All tasks are isolated and self-healing.
+elimu_ai/scheduler.py — Autonomous background scheduler (APScheduler 3.x).
+
+ZERO Django ORM imports. All forum/catalog ops go through HTTP.
+Must run independently — Django being down must not crash any task.
+Each task catches its own exceptions and returns a status string.
 """
 
 from __future__ import annotations
@@ -29,8 +32,12 @@ scheduler_status: Dict[str, Any] = {
     "errors":     {},
 }
 
+# ── Guard: prevent multiple scheduler instances in same process ──────────────
+_scheduler_instance: Optional[Any] = None
+_scheduler_lock = threading.Lock()
 
-# ── Task implementations ──────────────────────────────────────────────────────
+
+# ── Tasks — all HTTP-based, zero Django imports ───────────────────────────────
 
 def task_answer_unanswered() -> str:
     try:
@@ -65,25 +72,32 @@ def task_generate_discussions() -> str:
 
 
 def task_recommend_resources() -> str:
+    """Post catalog recommendations to resource-request threads — via HTTP."""
     try:
-        from elimu_ai.tools.forum import _django_available
-        if not _django_available():
-            return "Django not available — skipped."
-        from django.contrib.auth.models import User
-        from forum.models import Post
-        from elimu_ai.personas import LIBRARIAN
-        from elimu_ai.tools.answer import unanswered_threads
+        from elimu_ai.tools.forum import get_unanswered_threads, post_ai_answer
         from elimu_ai.tools.library import find_materials
-        _KW = ["notes","revision","past paper","scheme","resources","lesson plan","assessment"]
-        ai_user, _ = User.objects.get_or_create(
-            username=LIBRARIAN,
-            defaults={"email": "librarian@elimutalks.ai", "is_active": True},
-        )
+
+        _KEYWORDS = ["notes", "revision", "past paper", "scheme", "resources",
+                     "lesson plan", "assessment", "homework"]
+        threads = get_unanswered_threads()
+        if not threads:
+            return "No unanswered threads — Django may be unavailable."
+
         count = 0
-        for thread in unanswered_threads():
-            if any(kw in thread.title.lower() for kw in _KW) and thread.posts.count() == 1:
-                Post.objects.create(thread=thread, author=ai_user, content=find_materials(thread.title))
-                count += 1
+        for thread in threads:
+            thread_id  = thread.get("id")
+            title      = thread.get("title", "")
+            post_count = thread.get("post_count", thread.get("posts_count", 0))
+            if not thread_id or not title or post_count != 1:
+                continue
+            if any(kw in title.lower() for kw in _KEYWORDS):
+                content = find_materials(title)
+                if content and post_ai_answer(
+                    thread_id=thread_id,
+                    content=content,
+                    idempotency_key=f"ai-recommend-{thread_id}",
+                ):
+                    count += 1
         return f"Posted {count} resource replies."
     except Exception as exc:
         logger.error("task_recommend_resources: %s", exc)
@@ -91,27 +105,39 @@ def task_recommend_resources() -> str:
 
 
 def task_moderate_content() -> str:
+    """Scan recent posts for spam — via HTTP moderation endpoint."""
     try:
-        from elimu_ai.tools.forum import _django_available
-        if not _django_available():
-            return "Django not available — skipped."
-        from datetime import timedelta
-        from django.utils import timezone as dj_tz
-        from forum.models import Post
+        from elimu_ai.http_client import get_client
         from elimu_ai.tools.moderation import moderate
-        cutoff = dj_tz.now() - timedelta(hours=1)
-        posts = Post.objects.filter(created_at__gte=cutoff)
-        flagged = sum(1 for p in posts if moderate(p.content or "") != "Content approved.")
-        return f"Scanned {posts.count()} posts, flagged {flagged}."
+
+        client = get_client()
+        # GET recent posts via the Django API
+        try:
+            data  = client.get("/api/ai/forum/recent-posts/", {"hours": "1"})
+            posts = data.get("results") or data.get("posts") or []
+        except Exception:
+            return "Django unavailable — moderation skipped."
+
+        flagged = 0
+        for post in posts:
+            content = post.get("content", "")
+            result  = moderate(content)
+            if result != "Content approved.":
+                logger.warning("moderate: post #%s flagged: %s", post.get("id"), result)
+                flagged += 1
+        return f"Scanned {len(posts)} posts, flagged {flagged}."
     except Exception as exc:
         logger.error("task_moderate_content: %s", exc)
         return f"Error: {exc}"
 
 
 def task_catalog_sync() -> str:
+    """Reload the local catalog cache from disk."""
     try:
         import elimu_ai.catalog_search as cs
-        cs._index = None; cs._catalog = None; cs._load()
+        cs._index = None
+        cs._catalog = None
+        cs._load()
         return "Catalog cache refreshed."
     except Exception as exc:
         logger.error("task_catalog_sync: %s", exc)
@@ -125,7 +151,6 @@ def task_health_check() -> str:
         report = get_health()
         status = report.get("status", "unknown")
         AgentLogRepository().log_health_report(status, report)
-        # Trigger alerts on critical failures
         if report.get("gemini", {}).get("status") != "ok":
             from elimu_ai.email_alerts import alert_gemini_unavailable
             alert_gemini_unavailable()
@@ -142,11 +167,11 @@ def task_summarise_memory() -> str:
     try:
         from elimu_ai.memory import memory_store
         sessions = memory_store.session_ids()
-        summarised = 0
-        for sid in sessions:
-            if memory_store.should_summarise(sid):
-                memory_store.save_summary(sid, user_id=None)
-                summarised += 1
+        summarised = sum(
+            1 for sid in sessions
+            if memory_store.should_summarise(sid)
+            and memory_store.save_summary(sid, user_id=None)
+        )
         return f"Summarised {summarised}/{len(sessions)} sessions."
     except Exception as exc:
         logger.error("task_summarise_memory: %s", exc)
@@ -155,18 +180,15 @@ def task_summarise_memory() -> str:
 
 def task_generate_quiz_of_day() -> str:
     try:
-        from elimu_ai.catalog_search import current_term
         from elimu_ai.gemini import generate
         subjects = ["Mathematics", "Biology", "Chemistry", "Physics", "History", "Kiswahili"]
-        day = datetime.now(tz=timezone.utc).timetuple().tm_yday
-        subject = subjects[day % len(subjects)]
-        prompt = (
+        subject  = subjects[datetime.now(tz=timezone.utc).timetuple().tm_yday % len(subjects)]
+        prompt   = (
             f"Generate a short Quiz of the Day for Kenyan {subject} students. "
-            f"Write 3 multiple choice questions with answers. Plain text only."
+            "3 multiple choice questions with answers. Plain text only."
         )
         result = generate(prompt)
         if not result.startswith("Elimu AI"):
-            logger.info("quiz_of_day: generated for %s", subject)
             return f"Quiz of Day ({subject}): generated."
         return "Quiz of Day: Gemini unavailable."
     except Exception as exc:
@@ -177,51 +199,41 @@ def task_generate_quiz_of_day() -> str:
 def task_generate_study_tip() -> str:
     try:
         from elimu_ai.gemini import generate
-        prompt = (
+        result = generate(
             "Write one practical study tip for a Kenyan secondary school student. "
             "Plain text, 2–3 sentences, friendly tone."
         )
-        result = generate(prompt)
-        if not result.startswith("Elimu AI"):
-            return f"Study tip generated."
-        return "Study tip: Gemini unavailable."
+        return "Study tip generated." if not result.startswith("Elimu AI") else "Gemini unavailable."
     except Exception as exc:
         logger.error("task_generate_study_tip: %s", exc)
         return f"Error: {exc}"
 
 
-def task_restart_scheduler_if_needed() -> str:
-    """Self-healing: restart scheduler if it has stopped."""
-    try:
-        st = get_status()
-        if not st.get("running"):
-            logger.warning("scheduler: detected stopped — restarting")
-            start_scheduler(daemon=True)
-            from elimu_ai.email_alerts import alert_scheduler_crashed
-            alert_scheduler_crashed()
-            return "Scheduler restarted."
-        return "Scheduler healthy."
-    except Exception as exc:
-        return f"Error: {exc}"
+def task_scheduler_self_heal() -> str:
+    """Verify scheduler is still running — no-op if healthy."""
+    st = get_status()
+    if not st.get("running"):
+        logger.warning("scheduler: self-heal detected stopped state — restarting")
+        start_scheduler(daemon=True)
+        return "Scheduler restarted."
+    return "Scheduler healthy."
 
 
 # ── Task registry ─────────────────────────────────────────────────────────────
 
 _TASK_REGISTRY: List[Tuple[str, Callable[[], str], int]] = [
-    ("answer_unanswered",       task_answer_unanswered,          SCHEDULER_ANSWER_INTERVAL),
-    ("generate_discussions",    task_generate_discussions,        SCHEDULER_DISCUSS_INTERVAL),
-    ("recommend_resources",     task_recommend_resources,         SCHEDULER_RECOMMEND_INTERVAL),
-    ("moderate_content",        task_moderate_content,            SCHEDULER_MODERATE_INTERVAL),
-    ("catalog_sync",            task_catalog_sync,                SCHEDULER_CATALOG_INTERVAL),
-    ("health_check",            task_health_check,                int(900)),      # 15 min
-    ("summarise_memory",        task_summarise_memory,            int(3600)),     # 1 hr
-    ("quiz_of_day",             task_generate_quiz_of_day,        int(86400)),    # daily
-    ("study_tip",               task_generate_study_tip,          int(43200)),    # 12 hr
-    ("scheduler_self_heal",     task_restart_scheduler_if_needed, int(300)),      # 5 min
+    ("answer_unanswered",    task_answer_unanswered,    SCHEDULER_ANSWER_INTERVAL),
+    ("generate_discussions", task_generate_discussions,  SCHEDULER_DISCUSS_INTERVAL),
+    ("recommend_resources",  task_recommend_resources,   SCHEDULER_RECOMMEND_INTERVAL),
+    ("moderate_content",     task_moderate_content,      SCHEDULER_MODERATE_INTERVAL),
+    ("catalog_sync",         task_catalog_sync,          SCHEDULER_CATALOG_INTERVAL),
+    ("health_check",         task_health_check,          900),
+    ("summarise_memory",     task_summarise_memory,      3600),
+    ("quiz_of_day",          task_generate_quiz_of_day,  86400),
+    ("study_tip",            task_generate_study_tip,    43200),
+    ("scheduler_self_heal",  task_scheduler_self_heal,   300),
 ]
 
-
-# ── APScheduler ───────────────────────────────────────────────────────────────
 
 def _make_job(name: str, fn: Callable[[], str]) -> Callable[[], None]:
     def job() -> None:
@@ -232,7 +244,7 @@ def _make_job(name: str, fn: Callable[[], str]) -> Callable[[], None]:
             result = f"Error: {exc}"
             logger.error("scheduler [%s] raised: %s", name, exc)
         duration_ms = int((time.monotonic() - t0) * 1000)
-        now = datetime.now(tz=timezone.utc).isoformat()
+        now      = datetime.now(tz=timezone.utc).isoformat()
         is_error = result.startswith("Error:")
         scheduler_status["last_run"][name] = {"at": now, "result": result}
         if is_error:
@@ -252,13 +264,9 @@ def _make_job(name: str, fn: Callable[[], str]) -> Callable[[], None]:
                 error=result if is_error else None,
             )
         except Exception as db_exc:
-            logger.debug("scheduler DB log failed: %s", db_exc)
+            logger.debug("scheduler: DB log failed (non-fatal): %s", db_exc)
     job.__name__ = f"task_{name}"
     return job
-
-
-_scheduler_instance: Optional[Any] = None
-_scheduler_lock = threading.Lock()
 
 
 def _build_scheduler():
@@ -284,9 +292,11 @@ def _build_scheduler():
 
 
 def start_scheduler(daemon: bool = True) -> Any:
+    """Start APScheduler. Safe to call multiple times — reuses running instance."""
     global _scheduler_instance
     with _scheduler_lock:
         if _scheduler_instance is not None and _scheduler_instance.running:
+            logger.debug("scheduler: already running — reusing.")
             return _scheduler_instance
         sched = _build_scheduler()
         sched.start(paused=False)
@@ -304,11 +314,11 @@ def shutdown_scheduler(wait: bool = True) -> None:
             _scheduler_instance.shutdown(wait=wait)
         scheduler_status["running"] = False
         _scheduler_instance = None
+    logger.info("APScheduler shut down (wait=%s).", wait)
 
 
 def run_all_tasks() -> Dict[str, str]:
     results: Dict[str, str] = {}
-    logger.info("run_all_tasks: %d tasks", len(_TASK_REGISTRY))
     for name, fn, _ in _TASK_REGISTRY:
         try:
             results[name] = fn()
@@ -322,6 +332,7 @@ def get_status() -> Dict[str, Any]:
 
 
 def _run_standalone() -> None:
+    """Entry point for: python -m elimu_ai.scheduler"""
     from elimu_ai.logging_config import configure_logging
     configure_logging()
     logger.info("Elimu AI Scheduler — standalone mode")
@@ -329,6 +340,7 @@ def _run_standalone() -> None:
     stop_event = threading.Event()
 
     def _sig(signum, frame):
+        logger.info("Signal %d received — shutting down.", signum)
         stop_event.set()
 
     signal.signal(signal.SIGINT, _sig)

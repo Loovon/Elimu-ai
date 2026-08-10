@@ -1,6 +1,9 @@
 """
-elimu_ai/health.py  —  Comprehensive health check system.
-Each component exposes: status, latency_ms, last_ok, last_error, detail.
+elimu_ai/health.py — Component health checks.
+
+Key rule: Django being unavailable must NOT mark the AI worker as dead.
+Each component is checked independently.
+The Qdrant check verifies vector dimension == EMBED_DIM.
 """
 
 from __future__ import annotations
@@ -15,21 +18,15 @@ _START_TIME: float = time.monotonic()
 
 
 def _probe(fn) -> Dict[str, Any]:
-    """Run a check function and return a standardised status dict."""
     t0 = time.monotonic()
     try:
         result = fn()
         result.setdefault("latency_ms", int((time.monotonic() - t0) * 1000))
         return result
     except Exception as exc:
-        return {
-            "status":     "degraded",
-            "detail":     str(exc),
-            "latency_ms": int((time.monotonic() - t0) * 1000),
-        }
+        return {"status": "degraded", "detail": str(exc),
+                "latency_ms": int((time.monotonic() - t0) * 1000)}
 
-
-# ── Component checks ──────────────────────────────────────────────────────────
 
 def check_gemini() -> Dict[str, Any]:
     from elimu_ai.config import GEMINI_API_KEY, LLM_MODEL
@@ -50,16 +47,15 @@ def check_qdrant() -> Dict[str, Any]:
     client = _get_client()
     if client is None:
         return {"status": "degraded", "detail": "client init failed"}
-    # Verify collection dimension
-    info = get_collection_info(COLLECTION_NAME)
+    info     = get_collection_info(COLLECTION_NAME)
     vec_size = info.get("vector_size")
     if vec_size is not None and vec_size != EMBED_DIM:
         return {
-            "status":  "degraded",
-            "detail":  f"Collection vector_size={vec_size} but EMBED_DIM={EMBED_DIM}. Rebuild required.",
-            "collection": COLLECTION_NAME,
+            "status":      "degraded",
+            "detail":      f"Collection {COLLECTION_NAME} has {vec_size}-dim but EMBED_DIM={EMBED_DIM}",
             "vector_size": vec_size,
-            "expected": EMBED_DIM,
+            "expected":    EMBED_DIM,
+            "collection":  COLLECTION_NAME,
         }
     return {
         "status":       "ok",
@@ -89,45 +85,60 @@ def check_catalog() -> Dict[str, Any]:
 
 
 def check_scheduler() -> Dict[str, Any]:
-    from elimu_ai.scheduler import get_status  # lazy — avoids circular
+    from elimu_ai.scheduler import get_status  # lazy
     st = get_status()
-    errors = st.get("errors", {})
     return {
-        "status":       "ok" if st.get("running") else "degraded",
-        "running":      st.get("running", False),
-        "started_at":   st.get("started_at"),
-        "error_count":  len(errors),
-        "last_run":     {k: v.get("at") for k, v in st.get("last_run", {}).items()},
+        "status":      "ok" if st.get("running") else "degraded",
+        "running":     st.get("running", False),
+        "started_at":  st.get("started_at"),
+        "error_count": len(st.get("errors", {})),
+        "last_run":    {k: v.get("at") for k, v in st.get("last_run", {}).items()},
     }
 
 
 def check_memory() -> Dict[str, Any]:
     from elimu_ai.memory import memory_store
-    sessions = len(memory_store.session_ids())
-    return {"status": "ok", "active_sessions": sessions}
+    return {"status": "ok", "active_sessions": len(memory_store.session_ids())}
 
 
 def check_agent_manager() -> Dict[str, Any]:
-    from elimu_ai.agent_manager import get_status  # lazy — avoids circular
+    from elimu_ai.agent_manager import get_status  # lazy
     st = get_status()
     return {
         "status":        "ok" if st.get("running") else "degraded",
         "running":       st.get("running", False),
         "jobs_launched": st.get("jobs_launched", 0),
         "last_check_at": st.get("last_check_at"),
+        "django_status": st.get("django_status", "unknown"),
+        "catalog_status":st.get("catalog_status", "unknown"),
     }
+
+
+def check_django() -> Dict[str, Any]:
+    """
+    Check Django API reachability via HTTP.
+    Django being unavailable must NOT affect the AI worker's own health status.
+    """
+    try:
+        from elimu_ai.tools.forum import check_django_available
+        ok = check_django_available()
+        return {"status": "ok" if ok else "unavailable",
+                "detail": None if ok else "Django API not reachable"}
+    except Exception as exc:
+        return {"status": "unavailable", "detail": str(exc)}
 
 
 def check_tools() -> Dict[str, Any]:
     from elimu_ai.tool_registry import registry
-    names = registry.all_names()
-    return {"status": "ok", "registered": names, "count": len(names)}
+    return {"status": "ok", "registered": registry.all_names(),
+            "count": len(registry.all_names())}
 
 
 def check_agents() -> Dict[str, Any]:
     try:
         from elimu_ai.agents.supervisor import SupervisorAgent  # noqa
-        return {"status": "ok", "agents": ["supervisor","intent","planner","tool_selector","verifier","learning"]}
+        return {"status": "ok",
+                "agents": ["supervisor","intent","planner","tool_selector","verifier","learning"]}
     except Exception as exc:
         return {"status": "degraded", "detail": str(exc)}
 
@@ -139,62 +150,45 @@ def check_personas() -> Dict[str, Any]:
 
 
 def check_community() -> Dict[str, Any]:
-    try:
-        from elimu_ai.tools.forum import _django_available
-        django_ok = _django_available()
-        return {
-            "status":  "ok" if django_ok else "degraded",
-            "django":  django_ok,
-            "detail":  None if django_ok else "Django not configured",
-        }
-    except Exception as exc:
-        return {"status": "degraded", "detail": str(exc)}
+    return check_django()
 
 
 def check_forum() -> Dict[str, Any]:
-    return check_community()
+    return check_django()
 
 
 def check_recommendations() -> Dict[str, Any]:
     from elimu_ai.catalog_search import catalog_available
     ok = catalog_available()
-    return {
-        "status": "ok" if ok else "degraded",
-        "catalog_available": ok,
-    }
+    return {"status": "ok" if ok else "degraded", "catalog_available": ok}
 
 
 def check_cache() -> Dict[str, Any]:
     from elimu_ai.db.connection import db_available
     db_ok = db_available()
-    return {
-        "status": "ok" if db_ok else "degraded",
-        "backend": "postgresql" if db_ok else "none",
-    }
+    return {"status": "ok" if db_ok else "degraded",
+            "backend": "postgresql" if db_ok else "none"}
 
 
 def check_jobs() -> Dict[str, Any]:
     from elimu_ai.scheduler import get_status, _TASK_REGISTRY
     st = get_status()
     return {
-        "status":       "ok" if st.get("running") else "degraded",
-        "registered":   [name for name, _, _ in _TASK_REGISTRY],
-        "last_run":     st.get("last_run", {}),
-        "errors":       st.get("errors", {}),
+        "status":     "ok" if st.get("running") else "degraded",
+        "registered": [name for name, _, _ in _TASK_REGISTRY],
+        "last_run":   st.get("last_run", {}),
+        "errors":     st.get("errors", {}),
     }
 
 
 def check_environment() -> Dict[str, Any]:
-    required = [
-        "GEMINI_API_KEY", "QDRANT_URL", "QDRANT_API_KEY",
-        "COLLECTION_NAME", "DATABASE_URL",
-        "ELIMU_API_BASE_URL", "AI_SHARED_SECRET",
-    ]
+    required = ["GEMINI_API_KEY", "QDRANT_URL", "QDRANT_API_KEY",
+                "COLLECTION_NAME", "ELIMU_API_BASE_URL", "AI_SHARED_SECRET"]
+    optional = ["DATABASE_URL", "LOG_LEVEL", "LLM_MODEL", "EMBED_MODEL"]
     missing = [k for k in required if not os.getenv(k)]
-    return {
-        "status":          "degraded" if missing else "ok",
-        "missing_required": missing,
-    }
+    return {"status": "degraded" if missing else "ok",
+            "missing_required": missing,
+            "optional_set": [k for k in optional if os.getenv(k)]}
 
 
 # ── Master report ─────────────────────────────────────────────────────────────
@@ -205,6 +199,7 @@ def get_health() -> Dict[str, Any]:
     components = {
         "gemini":          _probe(check_gemini),
         "qdrant":          _probe(check_qdrant),
+        "django":          _probe(check_django),     # independent — never kills AI status
         "postgresql":      _probe(check_postgresql),
         "catalog":         _probe(check_catalog),
         "scheduler":       _probe(check_scheduler),
@@ -221,13 +216,12 @@ def get_health() -> Dict[str, Any]:
         "environment":     _probe(check_environment),
     }
 
-    critical = ("gemini", "qdrant", "catalog")
-    overall = "ok" if all(
-        components[k]["status"] == "ok" for k in critical
-    ) else "degraded"
+    # AI worker is healthy if its OWN services are ok — not Django
+    ai_critical = ("gemini", "qdrant", "catalog")
+    ai_ok = all(components[k]["status"] == "ok" for k in ai_critical)
 
     return {
-        "status":         overall,
+        "status":         "ok" if ai_ok else "degraded",
         "version":        SYSTEM_VERSION,
         "uptime_seconds": round(time.monotonic() - _START_TIME, 1),
         **components,

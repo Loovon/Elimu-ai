@@ -1,27 +1,11 @@
 """
 elimu_ai/orchestrator.py
 
-AI Orchestrator — the execution engine of the agentic platform.
+AI Orchestrator — multi-target query support with per-target deduplication.
 
-Responsibilities:
-  1. Detect multiple intents using confidence scoring
-  2. Extract curriculum context hints
-  3. Search Qdrant for semantic context
-  4. Build the full prompt context
-  5. Look up tools from the registry
-  6. Execute tools sequentially (with retries)
-  7. Merge tool results into a single answer
-  8. Save analytics and memory
-  9. Return a structured OrchestratorResult
-
-The orchestrator replaces the single-persona branch logic in agent.py.
-The existing run_agent() function delegates to run_orchestrator() and
-maps the result back to the legacy response shape for API compatibility.
-
-Rules:
-  - No UI code. No HTTP code.
-  - Orchestrator owns execution; tools own logic.
-  - All errors are caught and included in the result, never raised.
+Key fix: compound queries like "Maths Grade 2 revision AND Kiswahili Grade 6 schemes"
+produce TWO independent retrieval targets that stay separated throughout the pipeline.
+The final response is composed once and clearly labelled.
 """
 
 from __future__ import annotations
@@ -38,32 +22,37 @@ from elimu_ai.tool_registry import registry
 from elimu_ai.qdrant_db import search as qdrant_search
 from elimu_ai.helpers import clean_answer, rewrite_links, referral_url
 from elimu_ai.tools.teacher import extract_context_hints, extract_context_from_history
+from elimu_ai.query_parser import QueryParser, ParsedQuery
 
 logger = logging.getLogger(__name__)
 
-# ── Result dataclass ──────────────────────────────────────────────────────────
+_query_parser = QueryParser()
+
+
+@dataclass
+class TargetResult:
+    """Result for a single retrieval target within a compound query."""
+    target_label: str          # e.g. "Mathematics — Grade 2"
+    grade:        Optional[str]
+    subject:      Optional[str]
+    doc_type:     Optional[str]
+    content:      str
+    sources:      List[str] = field(default_factory=list)
+
 
 @dataclass
 class OrchestratorResult:
-    """
-    Structured result from one orchestrator run.
-
-    Fields match the existing API response schema so service.py needs
-    no changes to remain backward compatible.
-    """
-    request_id: str
-    persona: str                           # primary intent name (for API compat)
-    answer: str                            # merged plain-text answer
-    sources: List[str]                     # referral-tagged source URLs
-    tools: List[str]                       # tool names that were invoked
-    intents: List[IntentResult]            # all detected intents
+    request_id:   str
+    persona:      str
+    answer:       str
+    sources:      List[str]
+    tools:        List[str]
+    intents:      List[IntentResult]
     execution_ms: int = 0
-    had_error: bool = False
+    had_error:    bool = False
     error_detail: str = ""
     tool_outputs: Dict[str, str] = field(default_factory=dict)
 
-
-# ── Orchestrator ──────────────────────────────────────────────────────────────
 
 def run_orchestrator(
     question: str,
@@ -72,178 +61,257 @@ def run_orchestrator(
     user_id: Optional[int] = None,
     request_id: Optional[str] = None,
 ) -> OrchestratorResult:
-    """
-    Execute the full agentic pipeline.
-
-    Parameters
-    ----------
-    question : str
-        The user's message.
-    history : list, optional
-        Prior conversation turns [{role, content}].
-    session_id : str, optional
-        Session identifier for memory / analytics.
-    user_id : int, optional
-        Authenticated user ID.
-    request_id : str, optional
-        Unique request trace ID (auto-generated if not provided).
-
-    Returns
-    -------
-    OrchestratorResult
-    """
-    t_start = time.monotonic()
+    t_start    = time.monotonic()
     request_id = request_id or str(uuid.uuid4())
     history    = history or []
 
-    logger.info(
-        "orchestrator: request_id=%s question=%r session=%s user=%s",
-        request_id[:8], question[:80], session_id, user_id,
-    )
+    logger.info("orchestrator: rid=%s q=%r", request_id[:8], question[:80])
 
     if not question or not str(question).strip():
         return OrchestratorResult(
-            request_id=request_id,
-            persona="teacher",
+            request_id=request_id, persona="teacher",
             answer="Please ask a question and I'll be happy to help!",
-            sources=[],
-            tools=[],
-            intents=[],
+            sources=[], tools=[], intents=[],
         )
 
-    # ── 1. Detect intents ─────────────────────────────────────────────────────
-    intents = detect_intents(question)
+    # ── Intent detection ──────────────────────────────────────────────────────
+    intents      = detect_intents(question)
     intent_names = [i.name for i in intents]
-    primary = intent_names[0] if intent_names else "teacher"
+    primary      = intent_names[0] if intent_names else "teacher"
+    logger.info("orchestrator: intents=%s", [(i.name, round(i.confidence,2)) for i in intents])
 
-    logger.info(
-        "orchestrator: intents=%s",
-        [(i.name, round(i.confidence, 2)) for i in intents],
-    )
+    # ── Compound query parsing ────────────────────────────────────────────────
+    targets: List[ParsedQuery] = _query_parser.parse(question)
+    logger.info("orchestrator: %d targets parsed", len(targets))
 
-    # ── 2. Extract curriculum context ─────────────────────────────────────────
-    ctx_hints = extract_context_hints(question)
+    # ── Context extraction from history ──────────────────────────────────────
+    global_hints = extract_context_hints(question)
     if history:
-        hist_hints = extract_context_from_history(history[-6:])
-        for key in ("grade", "subject", "term", "year", "audience"):
-            if not ctx_hints.get(key) and hist_hints.get(key):
-                ctx_hints[key] = hist_hints[key]
+        hist = extract_context_from_history(history[-6:])
+        for k in ("grade", "subject", "term", "year", "audience"):
+            if not global_hints.get(k) and hist.get(k):
+                global_hints[k] = hist[k]
 
-    # ── 3. Qdrant search ──────────────────────────────────────────────────────
-    qdrant_hits = []
+    # ── Qdrant semantic search (one search for overall context) ───────────────
+    qdrant_hits: List = []
     try:
         qdrant_hits = qdrant_search(question)
     except Exception as exc:
-        logger.warning("orchestrator: Qdrant search failed: %s", exc)
+        logger.warning("orchestrator: Qdrant failed: %s", exc)
 
-    # ── 4. Catalog context (pre-fetch for non-librarian tools) ───────────────
-    catalog_str = ""
-    if any(i.name in ("librarian", "recommendation", "catalog") for i in intents):
-        catalog_str = _fetch_catalog(question, ctx_hints)
-
-    # ── 5. Build prompt context ───────────────────────────────────────────────
+    # ── Build shared prompt context ───────────────────────────────────────────
     ctx = build_context(
         question=question,
         persona=primary,
         intents=intent_names,
         history=history,
-        curriculum_hints=ctx_hints,
+        curriculum_hints=global_hints,
         qdrant_hits=qdrant_hits,
-        catalog_results=catalog_str,
     )
 
-    # ── 6. Build execution plan ───────────────────────────────────────────────
-    tools_plan = registry.execution_plan(intent_names)
-    logger.info(
-        "orchestrator: execution plan = %s",
-        [t.name for t in tools_plan],
-    )
-
-    # ── 7. Execute tools ──────────────────────────────────────────────────────
-    tool_outputs: Dict[str, str] = {}
-    tools_used: List[str] = ["qdrant_search"]
-    had_error = False
+    tools_used   = ["qdrant_search"]
+    had_error    = False
     error_detail = ""
+    tool_outputs: Dict[str, str] = {}
+
+    # ── Multi-target retrieval ────────────────────────────────────────────────
+    target_results: List[TargetResult] = []
+    seen_tool_calls: set = set()  # deduplication: (action, grade, subject)
+
+    is_retrieval_query = any(
+        i in intent_names for i in ("librarian", "recommendation", "catalog")
+    )
+
+    if is_retrieval_query and len(targets) > 0:
+        for tgt in targets:
+            dedup_key = (
+                "catalog_search",
+                (tgt.grade or "").lower(),
+                (tgt.subject or "").lower(),
+                (tgt.doc_type or "").lower(),
+            )
+            if dedup_key in seen_tool_calls:
+                logger.debug("orchestrator: dedup skipping %s", dedup_key)
+                continue
+            seen_tool_calls.add(dedup_key)
+
+            try:
+                result = _execute_per_target(tgt, question)
+                if result:
+                    label = _target_label(tgt)
+                    target_results.append(TargetResult(
+                        target_label=label,
+                        grade=tgt.grade,
+                        subject=tgt.subject,
+                        doc_type=tgt.doc_type,
+                        content=result,
+                    ))
+                    tools_used.append("catalog_search")
+            except Exception as exc:
+                logger.error("orchestrator: target retrieval failed: %s", exc)
+                had_error = True
+                error_detail = str(exc)
+
+        if target_results:
+            answer = _compose_multi_target(target_results, question)
+            answer = clean_answer(answer)
+            answer = rewrite_links(answer)
+            sources = _extract_sources_from_text(answer)
+            execution_ms = int((time.monotonic() - t_start) * 1000)
+            _save_analytics(request_id, session_id, user_id, primary,
+                            intent_names, tools_used, question, answer,
+                            execution_ms, had_error)
+            if session_id:
+                _update_memory(session_id, question, answer, user_id)
+            return OrchestratorResult(
+                request_id=request_id, persona=primary, answer=answer,
+                sources=sources, tools=tools_used, intents=intents,
+                execution_ms=execution_ms, had_error=had_error,
+                error_detail=error_detail, tool_outputs=tool_outputs,
+            )
+
+    # ── Single-intent tool execution path ────────────────────────────────────
+    tools_plan = registry.execution_plan(intent_names)
+    logger.info("orchestrator: plan=%s", [t.name for t in tools_plan])
 
     for tool_def in tools_plan:
+        tool_key = (tool_def.name, global_hints.get("grade",""), global_hints.get("subject",""))
+        if tool_key in seen_tool_calls:
+            logger.debug("orchestrator: dedup skipping tool %s", tool_def.name)
+            continue
+        seen_tool_calls.add(tool_key)
         try:
-            logger.debug("orchestrator: executing tool %r", tool_def.name)
             output = tool_def.execute(context=ctx, question=question)
             tool_outputs[tool_def.name] = output or ""
             tools_used.append(tool_def.name)
         except Exception as exc:
-            logger.error(
-                "orchestrator: tool %r failed: %s", tool_def.name, exc, exc_info=True
-            )
+            logger.error("orchestrator: tool %r failed: %s", tool_def.name, exc)
             had_error = True
             error_detail = str(exc)
-            tool_outputs[tool_def.name] = f"[{tool_def.name} failed: {exc}]"
+            tool_outputs[tool_def.name] = ""
 
-    # ── 8. Merge tool outputs ─────────────────────────────────────────────────
-    answer = _merge_outputs(tool_outputs, intents, question)
+    answer = _merge_single_outputs(tool_outputs, intents, question)
     answer = clean_answer(answer)
     answer = rewrite_links(answer)
-
-    # ── 9. Source URLs ────────────────────────────────────────────────────────
     sources = _extract_sources(qdrant_hits)
 
     execution_ms = int((time.monotonic() - t_start) * 1000)
+    logger.info("orchestrator: done rid=%s ms=%d persona=%s tools=%s",
+                request_id[:8], execution_ms, primary, tools_used)
 
-    logger.info(
-        "orchestrator: done request_id=%s persona=%s tools=%s ms=%d",
-        request_id[:8], primary, tools_used, execution_ms,
-    )
-
-    # ── 10. Analytics (non-blocking) ──────────────────────────────────────────
-    _save_analytics(
-        request_id=request_id,
-        user_id=user_id,
-        session_id=session_id,
-        persona=primary,
-        intents=intent_names,
-        tools_used=tools_used,
-        question=question,
-        answer=answer,
-        execution_ms=execution_ms,
-        had_error=had_error,
-    )
-
-    # ── 11. Memory update ─────────────────────────────────────────────────────
+    _save_analytics(request_id, session_id, user_id, primary,
+                    intent_names, tools_used, question, answer,
+                    execution_ms, had_error)
     if session_id:
         _update_memory(session_id, question, answer, user_id)
 
     return OrchestratorResult(
-        request_id=request_id,
-        persona=primary,
-        answer=answer,
-        sources=sources,
-        tools=tools_used,
-        intents=intents,
-        execution_ms=execution_ms,
-        had_error=had_error,
-        error_detail=error_detail,
-        tool_outputs=tool_outputs,
+        request_id=request_id, persona=primary, answer=answer,
+        sources=sources, tools=tools_used, intents=intents,
+        execution_ms=execution_ms, had_error=had_error,
+        error_detail=error_detail, tool_outputs=tool_outputs,
     )
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# ── Per-target retrieval ──────────────────────────────────────────────────────
 
-def _fetch_catalog(question: str, ctx_hints: Dict) -> str:
-    """Run a catalog search and return formatted results."""
+def _execute_per_target(tgt: ParsedQuery, question: str) -> str:
+    """Run catalog+Qdrant retrieval for one specific target."""
+    from elimu_ai.tools.library import find_materials
+    return find_materials(
+        question=tgt.original or question,
+        grade=tgt.grade,
+        subject=tgt.subject,
+        term=tgt.term,
+        year=tgt.year,
+        audience=tgt.audience,
+    )
+
+
+def _target_label(tgt: ParsedQuery) -> str:
+    """Build a human-readable label for a retrieval target."""
+    parts = []
+    if tgt.subject:
+        parts.append(tgt.subject.title())
+    if tgt.grade:
+        g = tgt.grade
+        # normalise grade2 → Grade 2
+        import re
+        m = re.match(r"grade\s*(\d+|pp\d)", g, re.I)
+        if m:
+            parts.append(f"Grade {m.group(1).upper()}")
+        else:
+            parts.append(g.title())
+    if tgt.doc_type:
+        _DOC_LABELS = {
+            "schemesofwork": "Schemes of Work",
+            "notes":         "Notes",
+            "revision":      "Revision Materials",
+            "assessment":    "Exams / Past Papers",
+            "lessonplan":    "Lesson Plans",
+            "homework":      "Homework",
+        }
+        parts.append(_DOC_LABELS.get(tgt.doc_type, tgt.doc_type.title()))
+    return " — ".join(parts) if parts else tgt.original[:60]
+
+
+def _compose_multi_target(results: List[TargetResult], question: str) -> str:
+    """
+    Compose a single coherent answer from multiple retrieval targets.
+    Each target gets exactly one clearly labelled section.
+    No repetition.
+    """
+    if not results:
+        return "I couldn't find matching materials. Try rephrasing your query."
+    if len(results) == 1:
+        return results[0].content
+
+    parts = []
+    for r in results:
+        parts.append(f"{r.target_label}\n\n{r.content}")
+
+    return "\n\n---\n\n".join(parts)
+
+
+# ── Single-intent merge (unchanged behaviour) ─────────────────────────────────
+
+def _merge_single_outputs(
+    tool_outputs: Dict[str, str],
+    intents: List[IntentResult],
+    question: str,
+) -> str:
+    clean = {k: v for k, v in tool_outputs.items()
+             if v and not k.startswith("_")
+             and not (v.startswith("[") and v.endswith("]"))}
+    if not clean:
+        return "I was unable to generate a response. Please try again."
+    if len(clean) == 1:
+        return list(clean.values())[0]
+
+    _ORDER = ["teacher", "recommendation", "librarian", "quiz",
+              "community", "catalog", "moderation"]
+    _LABELS = {
+        "teacher": "Explanation", "quiz": "Practice Quiz",
+        "librarian": "Materials", "recommendation": "Recommended Materials",
+        "community": "Discussion", "catalog": "Catalog Results",
+        "moderation": "Content Check",
+    }
+    ordered = sorted(clean.keys(), key=lambda n: _ORDER.index(n) if n in _ORDER else 99)
+    parts   = [f"{_LABELS.get(n, n.title())}\n\n{clean[n]}" for n in ordered]
+    return "\n\n---\n\n".join(parts)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _fetch_catalog(question: str, hints: Dict) -> str:
     try:
-        from elimu_ai.catalog_search import (
-            catalog_available, search_catalog, format_recommendations,
-        )
+        from elimu_ai.catalog_search import catalog_available, search_catalog, format_recommendations
         if not catalog_available():
             return ""
         results = search_catalog(
-            grade=ctx_hints.get("grade"),
-            subject=ctx_hints.get("subject"),
-            term=ctx_hints.get("term"),
-            year=ctx_hints.get("year"),
-            audience=ctx_hints.get("audience"),
-            keyword=question,
-            max_results=5,
+            grade=hints.get("grade"), subject=hints.get("subject"),
+            term=hints.get("term"), year=hints.get("year"),
+            audience=hints.get("audience"), keyword=question, max_results=5,
         )
         return format_recommendations(results, question) if results else ""
     except Exception as exc:
@@ -251,63 +319,7 @@ def _fetch_catalog(question: str, ctx_hints: Dict) -> str:
         return ""
 
 
-def _merge_outputs(
-    tool_outputs: Dict[str, str],
-    intents: List[IntentResult],
-    question: str,
-) -> str:
-    """
-    Intelligently merge multiple tool outputs into one response.
-
-    Strategy:
-    - If only one tool ran, return its output directly.
-    - If multiple tools ran, join with clear section separators.
-    - Moderation always appears last if present.
-    """
-    if not tool_outputs:
-        return "I was unable to generate a response. Please try again."
-
-    # Strip tool failure markers for display
-    clean_outputs = {
-        name: text
-        for name, text in tool_outputs.items()
-        if text and not text.startswith("[") and not text.endswith("]")
-    }
-
-    if not clean_outputs:
-        return "I encountered an error processing your request. Please try again."
-
-    if len(clean_outputs) == 1:
-        return list(clean_outputs.values())[0]
-
-    # Multi-tool: label each section
-    _LABELS = {
-        "teacher":       "Explanation",
-        "quiz":          "Practice Quiz",
-        "librarian":     "Materials",
-        "recommendation":"Recommended Materials",
-        "community":     "Discussion",
-        "catalog":       "Catalog Results",
-        "moderation":    "Content Check",
-    }
-
-    # Order: teacher → recommendation/librarian → quiz → community → catalog
-    _ORDER = ["teacher", "recommendation", "librarian", "quiz", "community", "catalog", "moderation"]
-    ordered_names = sorted(
-        clean_outputs.keys(),
-        key=lambda n: _ORDER.index(n) if n in _ORDER else 99,
-    )
-
-    parts = []
-    for name in ordered_names:
-        label = _LABELS.get(name, name.title())
-        parts.append(f"{label}\n\n{clean_outputs[name]}")
-
-    return "\n\n---\n\n".join(parts)
-
-
 def _extract_sources(hits: List) -> List[str]:
-    """Extract referral-tagged source URLs from Qdrant hits."""
     sources = []
     for hit in hits:
         try:
@@ -319,45 +331,40 @@ def _extract_sources(hits: List) -> List[str]:
     return sources
 
 
-def _save_analytics(
-    request_id: str,
-    user_id: Optional[int],
-    session_id: Optional[str],
-    persona: str,
-    intents: List[str],
-    tools_used: List[str],
-    question: str,
-    answer: str,
-    execution_ms: int,
-    had_error: bool,
-) -> None:
-    """Save request analytics to DB (non-fatal)."""
+def _extract_sources_from_text(text: str) -> List[str]:
+    import re
+    urls    = re.findall(r"https?://www\.elimulibrary\.com/site/document/[^\s\)\"']+", text)
+    sources = []
+    seen    = set()
+    for url in urls:
+        clean = url.rstrip(".,;:")
+        if clean not in seen:
+            seen.add(clean)
+            sources.append(referral_url(clean))
+    return sources
+
+
+def _merge_outputs(tool_outputs, intents, question):
+    """Backward-compat alias for orchestrator tests."""
+    return _merge_single_outputs(tool_outputs, intents, question)
+
+
+def _save_analytics(request_id, session_id, user_id, persona,
+                    intents, tools_used, question, answer,
+                    execution_ms, had_error) -> None:
     try:
         from elimu_ai.db.repositories import AnalyticsRepository
-        repo = AnalyticsRepository()
-        repo.log_request(
-            request_id=request_id,
-            user_id=user_id,
-            persona=persona,
-            intents=intents,
-            tools_used=tools_used,
-            question_len=len(question),
-            answer_len=len(answer),
-            execution_ms=execution_ms,
-            had_error=had_error,
-            session_id=session_id,
+        AnalyticsRepository().log_request(
+            request_id=request_id, user_id=user_id, session_id=session_id,
+            persona=persona, intents=intents, tools_used=tools_used,
+            question_len=len(question), answer_len=len(answer),
+            execution_ms=execution_ms, had_error=had_error,
         )
     except Exception as exc:
-        logger.debug("orchestrator: analytics save failed (non-fatal): %s", exc)
+        logger.debug("orchestrator: analytics save failed: %s", exc)
 
 
-def _update_memory(
-    session_id: str,
-    question: str,
-    answer: str,
-    user_id: Optional[int],
-) -> None:
-    """Add turns to memory and trigger summary if due (non-fatal)."""
+def _update_memory(session_id, question, answer, user_id) -> None:
     try:
         from elimu_ai.memory import memory_store
         memory_store.add_turn(session_id, "user", question)
@@ -365,4 +372,4 @@ def _update_memory(
         if memory_store.should_summarise(session_id):
             memory_store.save_summary(session_id, user_id=user_id)
     except Exception as exc:
-        logger.debug("orchestrator: memory update failed (non-fatal): %s", exc)
+        logger.debug("orchestrator: memory update failed: %s", exc)
