@@ -26,6 +26,12 @@ QDRANT_API_KEY: str  = os.getenv("QDRANT_API_KEY", "")
 COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "elimu_library")
 # Blue/green migration target — set to switch production collection
 COLLECTION_NAME_V2: str = os.getenv("COLLECTION_NAME_V2", "elimu_library_v2")
+# Minimum cosine similarity score for Qdrant results.
+# Collection uses Cosine distance with L2-normalised 768-dim vectors,
+# so scores are in [0, 1].  0.0 means no filtering (all results returned).
+# Set via QDRANT_SCORE_THRESHOLD env var.  Start at 0.0 and tune upward
+# after inspecting real score distributions from your collection.
+QDRANT_SCORE_THRESHOLD: float = float(os.getenv("QDRANT_SCORE_THRESHOLD", "0.0"))
 
 # ── Application ───────────────────────────────────────────────────────────────
 SYSTEM_NAME: str    = "Elimu AI"
@@ -40,6 +46,10 @@ SCHEDULER_DISCUSS_INTERVAL: int   = int(os.getenv("SCHEDULER_DISCUSS_INTERVAL", 
 SCHEDULER_RECOMMEND_INTERVAL: int = int(os.getenv("SCHEDULER_RECOMMEND_INTERVAL", "3600"))
 SCHEDULER_MODERATE_INTERVAL: int  = int(os.getenv("SCHEDULER_MODERATE_INTERVAL",  "900"))
 SCHEDULER_CATALOG_INTERVAL: int   = int(os.getenv("SCHEDULER_CATALOG_INTERVAL",   "43200"))
+# How often to retry previously unanswered questions (default: 6 hours)
+SCHEDULER_RETRY_FAILURES_INTERVAL: int = int(os.getenv("SCHEDULER_RETRY_FAILURES_INTERVAL", "21600"))
+# Maximum number of retry attempts per failed query before giving up
+MAX_RETRY_ATTEMPTS: int = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
 
 # ── PostgreSQL ────────────────────────────────────────────────────────────────
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")

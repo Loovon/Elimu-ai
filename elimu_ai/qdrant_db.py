@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from elimu_ai.config import (
     QDRANT_URL, QDRANT_API_KEY, COLLECTION_NAME,
-    MAX_RESULTS, RAG_CANDIDATES, EMBED_DIM,
+    MAX_RESULTS, RAG_CANDIDATES, EMBED_DIM, QDRANT_SCORE_THRESHOLD,
 )
 from elimu_ai.gemini import embed as gemini_embed
 
@@ -99,6 +99,7 @@ def search(
     limit: int = RAG_CANDIDATES,
     filters: Optional[Dict[str, Any]] = None,
     collection: str = COLLECTION_NAME,
+    score_threshold: Optional[float] = None,
 ) -> List:
     """
     Embed the query and search Qdrant.
@@ -109,6 +110,11 @@ def search(
     limit    : maximum candidates to return (default = RAG_CANDIDATES for reranking)
     filters  : optional dict of payload field → value for metadata pre-filtering
     collection : collection name (default = COLLECTION_NAME from config)
+    score_threshold : optional minimum cosine similarity score.  When None,
+        falls back to QDRANT_SCORE_THRESHOLD from config (default 0.0 = no filter).
+        Collection uses Cosine distance; Qdrant returns scores in [0, 1] for
+        L2-normalised vectors.  Set via QDRANT_SCORE_THRESHOLD env var.
+        Pass 0.0 explicitly to disable filtering for a specific call.
     """
     client = _get_client()
     if client is None:
@@ -128,6 +134,9 @@ def search(
 
     qdrant_filter = _build_filter(filters)
 
+    # Resolve effective threshold
+    effective_threshold = score_threshold if score_threshold is not None else QDRANT_SCORE_THRESHOLD
+
     try:
         kwargs: Dict[str, Any] = dict(
             collection_name=collection,
@@ -136,10 +145,13 @@ def search(
         )
         if qdrant_filter is not None:
             kwargs["query_filter"] = qdrant_filter
+        if effective_threshold and effective_threshold > 0.0:
+            kwargs["score_threshold"] = effective_threshold
 
         results = client.query_points(**kwargs)
         hits = results.points
-        logger.debug("Qdrant search: %d hits for query=%r", len(hits), query[:60])
+        logger.debug("Qdrant search: %d hits for query=%r (threshold=%.3f)",
+                     len(hits), query[:60], effective_threshold or 0.0)
         return hits
     except Exception as exc:
         logger.error("Qdrant search failed: %s", exc)

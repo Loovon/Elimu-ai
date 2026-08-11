@@ -143,7 +143,30 @@ def _execute_quiz(context: Any, question: str, **_) -> str:
     result = generate(prompt)
     if result.startswith("Elimu AI") or result.startswith("Gemini error"):
         return quiz_fallback(question)
+    # Persist the generated quiz (non-fatal)
+    _persist_quiz(context, question, result)
     return result
+
+
+def _persist_quiz(context: Any, question: str, quiz_content: str) -> None:
+    """Save a successfully generated quiz to ai_quiz. Non-fatal."""
+    try:
+        from elimu_ai.db.repositories import QuizRepository
+        hints = getattr(context, "curriculum_hints", {}) or {}
+        # session_id and user_id may be absent in some call paths
+        session_id = getattr(context, "session_id", None)
+        user_id    = getattr(context, "user_id", None)
+        QuizRepository().save_quiz(
+            session_id=session_id,
+            user_id=user_id,
+            question=question,
+            quiz_content=quiz_content,
+            subject=hints.get("subject"),
+            grade=hints.get("grade"),
+        )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).debug("_persist_quiz: %s", exc)
 
 
 def _execute_librarian(context: Any, question: str, **_) -> str:

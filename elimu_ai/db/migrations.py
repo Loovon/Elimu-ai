@@ -133,9 +133,12 @@ CREATE TABLE IF NOT EXISTS ai_failed_queries (
     user_id        INTEGER,
     session_id     VARCHAR(128),
     suggested_fix  TEXT,
+    retry_count    INTEGER DEFAULT 0,
+    resolved       BOOLEAN DEFAULT FALSE,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_failed_created ON ai_failed_queries(created_at);
+CREATE INDEX IF NOT EXISTS idx_failed_created  ON ai_failed_queries(created_at);
+CREATE INDEX IF NOT EXISTS idx_failed_resolved ON ai_failed_queries(resolved, retry_count);
 
 -- Intent history (for routing improvement)
 CREATE TABLE IF NOT EXISTS ai_intent_history (
@@ -242,8 +245,40 @@ def run_migrations() -> bool:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(_SCHEMA)
+                # Backward-compatible additions for existing deployments
+                _apply_incremental(cur)
         logger.info("migrations: AI schema applied successfully.")
         return True
     except Exception as exc:
         logger.error("migrations: failed: %s", exc)
         return False
+
+
+def _apply_incremental(cur) -> None:
+    """
+    ADD COLUMN statements that are safe to run on an already-created table.
+    Uses DO $$ ... $$ blocks so they are no-ops if the column already exists.
+    """
+    incremental_stmts = [
+        # retry_count and resolved for the learning loop
+        """
+        DO $$ BEGIN
+            ALTER TABLE ai_failed_queries ADD COLUMN retry_count INTEGER DEFAULT 0;
+        EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+        """,
+        """
+        DO $$ BEGIN
+            ALTER TABLE ai_failed_queries ADD COLUMN resolved BOOLEAN DEFAULT FALSE;
+        EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+        """,
+        # Index for the retry scheduler query
+        """
+        CREATE INDEX IF NOT EXISTS idx_failed_resolved
+            ON ai_failed_queries(resolved, retry_count);
+        """,
+    ]
+    for stmt in incremental_stmts:
+        try:
+            cur.execute(stmt)
+        except Exception as exc:
+            logger.warning("migrations: incremental stmt skipped: %s", exc)

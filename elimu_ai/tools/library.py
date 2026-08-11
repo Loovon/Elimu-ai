@@ -270,6 +270,12 @@ def find_materials(
     """
     Find learning materials using semantic RAG + structured filters.
     Returns formatted plain-text results with real URLs from evidence.
+
+    Retrieval states (internal, drives logging):
+      - "trusted_evidence"  : Qdrant hit with real URL
+      - "catalog_evidence"  : Flat-file catalog hit with real URL
+      - "no_evidence"       : Both sources returned 0 results
+      - "category_fallback" : No evidence; returning browse links only
     """
     ctx: Dict[str, Optional[str]] = {
         "grade": grade, "subject": subject,
@@ -309,6 +315,7 @@ def find_materials(
     # 1. Qdrant semantic search
     all_results: List[Dict[str, Any]] = []
     seen_urls: set = set()
+    qdrant_count = 0
 
     qdrant_hits = _qdrant_search_for_query(g, s, t, y, aud, doc_type, question)
     for r in qdrant_hits:
@@ -316,8 +323,10 @@ def find_materials(
         if url and url not in seen_urls:
             seen_urls.add(url)
             all_results.append(r)
+            qdrant_count += 1
 
     # 2. Catalog fallback
+    catalog_count = 0
     if len(all_results) < 3:
         cat_hits = _catalog_search_for_query(g, s, t, y, aud, doc_type, question)
         for r in cat_hits:
@@ -325,14 +334,29 @@ def find_materials(
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 all_results.append(r)
+                catalog_count += 1
 
+    # 3. No evidence at all — record failure and return browse fallback
     if not all_results:
+        logger.info(
+            "find_materials: no evidence found for question=%r grade=%s subject=%s "
+            "— recording retrieval failure",
+            question[:80], g, s,
+        )
+        _record_retrieval_failure(
+            question=question,
+            grade=g,
+            subject=s,
+            term=t,
+            audience=aud,
+            doc_type=doc_type,
+        )
         return _category_fallback(ctx, doc_type, question)
 
-    # 3. Rerank
+    # 4. Rerank
     ranked = _rerank_evidence(all_results, g, s, t, aud)
 
-    # 4. Filter teacher docs for student requests
+    # 5. Filter teacher docs for student requests
     if aud not in ("teacher",):
         student = [r for r in ranked if r.get("audience") != "teacher"]
         if student:
@@ -340,7 +364,7 @@ def find_materials(
 
     top = ranked[:5]
 
-    # 5. Build header
+    # 6. Build header
     header = ""
     parts = [p for p in [g, s] if p]
     if parts:
@@ -350,8 +374,40 @@ def find_materials(
         if aud: header += f" — for {aud}s"
         header += ":\n\n"
 
-    logger.info("find_materials: returning %d results for %r", len(top), question[:60])
+    logger.info("find_materials: returning %d results (qdrant=%d catalog=%d) for %r",
+                len(top), qdrant_count, catalog_count, question[:60])
     return header + _format_evidence(top, question)
+
+
+def _record_retrieval_failure(
+    question: str,
+    grade: Optional[str],
+    subject: Optional[str],
+    term: Optional[str],
+    audience: Optional[str],
+    doc_type: Optional[str],
+) -> None:
+    """
+    Record a zero-evidence retrieval to ai_failed_queries.
+    Non-fatal — any DB error is silently swallowed.
+    The fallback response is still returned to the user.
+    """
+    try:
+        from elimu_ai.agents.learning import LearningAgent
+        LearningAgent().record_failure(
+            question=question,
+            intents=["librarian"],
+            tools_used=["qdrant_search", "catalog_search"],
+            failure_reason="no_evidence",
+            confidence=0.0,
+            suggested_fix=(
+                f"No documents found for grade={grade} subject={subject} "
+                f"term={term} audience={audience} doctype={doc_type}. "
+                "Check catalog coverage and Qdrant collection health."
+            ),
+        )
+    except Exception as exc:
+        logger.debug("find_materials: could not record retrieval failure: %s", exc)
 
 
 def build_librarian_prompt(question: str, catalog_results: str = "") -> str:

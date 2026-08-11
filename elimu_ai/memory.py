@@ -218,6 +218,53 @@ class MemoryStore:
             logger.warning("memory: load_user_summaries failed: %s", exc)
             return []
 
+    def restore_session(
+        self,
+        session_id: str,
+        user_id: Optional[int] = None,
+    ) -> Optional[str]:
+        """
+        Restore the most recent stored summary for a session into the in-process
+        store as a synthetic context turn.
+
+        Called at the start of a new request when the session has no in-memory
+        turns (e.g. after a worker restart).  Injects a single "system" turn so
+        subsequent calls to get_history() include the prior-session context.
+
+        Returns the loaded summary text, or None if nothing was found.
+        Does NOT make a Gemini call.
+        """
+        with self._lock:
+            has_turns = bool(self._sessions.get(session_id))
+        if has_turns:
+            return None   # session already warm — nothing to restore
+
+        summary: Optional[str] = None
+        try:
+            from elimu_ai.db.repositories import MemoryRepository
+            repo = MemoryRepository()
+            summary = repo.get_summary(session_id)
+            if not summary and user_id:
+                summaries = repo.get_summaries(user_id=user_id, limit=1)
+                summary = summaries[0] if summaries else None
+        except Exception as exc:
+            logger.warning("memory: restore_session DB lookup failed: %s", exc)
+            return None
+
+        if summary:
+            with self._lock:
+                # Inject as a single "system" context turn so it appears in history
+                self._sessions[session_id].append({
+                    "role":      "system",
+                    "content":   f"[Previous session summary: {summary}]",
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                })
+            logger.info(
+                "memory: restored session summary for %r (chars=%d)",
+                session_id[:16], len(summary),
+            )
+        return summary
+
 
 # ── Global singleton ──────────────────────────────────────────────────────────
 

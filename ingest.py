@@ -109,9 +109,12 @@ def _build_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
     """Build the complete Qdrant point payload from a catalogue record."""
     url = doc.get("url", "") or ""
     referral = _add_referral(url)
+    from datetime import datetime, timezone
     return {
         "source":       "elimu_catalogue",
         "source_file":  "elimu_catalogue.json",
+        "source_type":  "catalog",           # trusted source — never AI-generated
+        "ingested_at":  datetime.now(tz=timezone.utc).isoformat(),
         "title":        (doc.get("title") or "").strip(),
         "description":  (doc.get("description") or "").strip(),
         "url":          url,

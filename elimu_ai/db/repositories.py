@@ -304,6 +304,78 @@ class AgentLogRepository:
                  "failure":r[3],"at":r[4]} for r in rows]
 
     @_db_op
+    def get_unresolved_failures(
+        self,
+        max_retries: int = 3,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return failed queries that have not yet been resolved and have not
+        exceeded the retry limit.  Used by the scheduler retry job.
+        """
+        from elimu_ai.db.connection import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id,question,intents,tools_used,failure_reason,"
+                    " confidence,suggested_fix,retry_count,created_at"
+                    " FROM ai_failed_queries"
+                    " WHERE resolved = FALSE AND retry_count < %s"
+                    " ORDER BY created_at ASC LIMIT %s",
+                    (max_retries, limit),
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return []
+        return [
+            {
+                "id":            r[0],
+                "question":      r[1],
+                "intents":       r[2],
+                "tools":         r[3],
+                "failure_reason":r[4],
+                "confidence":    r[5],
+                "suggested_fix": r[6],
+                "retry_count":   r[7],
+                "created_at":    r[8],
+            }
+            for r in rows
+        ]
+
+    def get_unresolved_failures_safe(
+        self,
+        max_retries: int = 3,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Wrapper that always returns a list — never None — even on DB failure."""
+        result = self.get_unresolved_failures(max_retries=max_retries, limit=limit)
+        return result if result is not None else []
+
+    @_db_op
+    def increment_retry(self, failure_id: int) -> None:
+        """Increment retry_count for a single failed query row."""
+        from elimu_ai.db.connection import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_failed_queries SET retry_count = retry_count + 1"
+                    " WHERE id = %s",
+                    (failure_id,),
+                )
+
+    @_db_op
+    def mark_resolved(self, failure_id: int) -> None:
+        """Mark a failed query as resolved after a successful retry."""
+        from elimu_ai.db.connection import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_failed_queries SET resolved = TRUE"
+                    " WHERE id = %s",
+                    (failure_id,),
+                )
+
+    @_db_op
     def log_health_report(self, status: str, report: dict) -> None:
         from elimu_ai.db.connection import get_connection
         with get_connection() as conn:

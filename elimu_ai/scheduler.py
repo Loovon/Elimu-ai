@@ -21,6 +21,8 @@ from elimu_ai.config import (
     SCHEDULER_DISCUSS_INTERVAL,
     SCHEDULER_MODERATE_INTERVAL,
     SCHEDULER_RECOMMEND_INTERVAL,
+    SCHEDULER_RETRY_FAILURES_INTERVAL,
+    MAX_RETRY_ATTEMPTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -219,6 +221,155 @@ def task_scheduler_self_heal() -> str:
     return "Scheduler healthy."
 
 
+def task_retry_failed_queries() -> str:
+    """
+    Retry previously unanswered/failed library queries.
+
+    Strategy per attempt number:
+      retry_count == 0 : normal retrieval (same as original request)
+      retry_count == 1 : relaxed — drop metadata filters, semantic-only
+      retry_count >= 2 : broadest — keyword only via catalog flat-file
+
+    A question is marked resolved=TRUE only when actual evidence is found
+    AND the answer passes VerifierAgent.  Category/browse fallbacks do NOT
+    count as a resolution.
+
+    Never generates a hallucinated answer.  Never marks resolved on empty.
+    Non-fatal — any single failure is skipped and logged.
+    """
+    try:
+        from elimu_ai.db.repositories import AgentLogRepository
+        from elimu_ai.agents.verifier import VerifierAgent
+        from elimu_ai.tools.library import _qdrant_search_for_query, _catalog_search_for_query
+        from elimu_ai.catalog_search import _extract_from_keyword, search_catalog, format_recommendations
+
+        repo     = AgentLogRepository()
+        verifier = VerifierAgent()
+        failures = repo.get_unresolved_failures_safe(
+            max_retries=MAX_RETRY_ATTEMPTS, limit=20
+        )
+        if not failures:
+            return "retry_failed_queries: nothing to retry."
+
+        resolved_count  = 0
+        attempted_count = 0
+
+        for row in failures:
+            fid      = row["id"]
+            question = row["question"]
+            retries  = row["retry_count"]
+
+            try:
+                attempted_count += 1
+
+                # Extract structure from the question text
+                grade, subject, term, year = _extract_from_keyword(question)
+
+                if retries == 0:
+                    # Attempt 1: normal retrieval with metadata filters
+                    hits = _qdrant_search_for_query(grade, subject, term, year,
+                                                    None, None, question)
+                elif retries == 1:
+                    # Attempt 2: relaxed — no metadata filters, semantic only
+                    from elimu_ai.qdrant_db import search as qdrant_search
+                    raw_hits = qdrant_search(question, score_threshold=0.0)
+                    hits = []
+                    for h in raw_hits:
+                        p = h.payload or {}
+                        url = p.get("url") or p.get("referral_url") or ""
+                        if url:
+                            hits.append({
+                                "source":   "qdrant",
+                                "score":    h.score,
+                                "title":    p.get("title", ""),
+                                "url":      url,
+                                "grade":    p.get("grade", ""),
+                                "subject":  p.get("subject", ""),
+                                "term":     p.get("term", ""),
+                                "year":     p.get("year", ""),
+                                "doctype":  p.get("doctype", ""),
+                                "audience": p.get("audience", ""),
+                                "price":    p.get("price"),
+                                "description": p.get("description", ""),
+                                "curriculum":  p.get("curriculum", ""),
+                            })
+                else:
+                    # Attempt 3: catalog flat-file keyword search only
+                    docs = search_catalog(keyword=question, max_results=5)
+                    hits = [
+                        {
+                            "source": "catalog", "score": 0.0,
+                            "title": d.get("title", ""), "url": d.get("url", ""),
+                            "grade": d.get("grade", ""), "subject": d.get("subject", ""),
+                            "term":  d.get("term", ""),  "year":    d.get("year", ""),
+                            "doctype": d.get("doctype", ""), "audience": d.get("audience", ""),
+                            "price": d.get("price"), "description": d.get("description", ""),
+                            "curriculum": d.get("curriculum", ""),
+                        }
+                        for d in docs if d.get("url")
+                    ]
+
+                if not hits:
+                    # No evidence found — increment retry count, leave unresolved
+                    repo.increment_retry(fid)
+                    logger.info("retry_failed_queries: no hits for %r (attempt %d)",
+                                question[:60], retries + 1)
+                    continue
+
+                # Format the evidence and verify
+                from elimu_ai.tools.library import _format_evidence
+                answer = _format_evidence(hits[:5], question)
+                result = verifier.verify(answer, question, [])
+
+                if result.passed:
+                    repo.mark_resolved(fid)
+                    resolved_count += 1
+                    logger.info(
+                        "retry_failed_queries: resolved %r after %d attempt(s)",
+                        question[:60], retries + 1,
+                    )
+                    # Cache the result so live requests can find it immediately
+                    _cache_resolved_answer(question, answer)
+                else:
+                    repo.increment_retry(fid)
+                    logger.info(
+                        "retry_failed_queries: evidence found but verification failed "
+                        "for %r — issues=%s",
+                        question[:60], result.issues,
+                    )
+
+            except Exception as row_exc:
+                logger.warning("retry_failed_queries: error on row %d: %s", fid, row_exc)
+                try:
+                    repo.increment_retry(fid)
+                except Exception:
+                    pass
+
+        return (
+            f"retry_failed_queries: attempted={attempted_count} "
+            f"resolved={resolved_count} remaining={attempted_count - resolved_count}"
+        )
+
+    except Exception as exc:
+        logger.error("task_retry_failed_queries: %s", exc)
+        return f"Error: {exc}"
+
+
+def _cache_resolved_answer(question: str, answer: str) -> None:
+    """Store a verified retry result in ai_recommendation_cache. Non-fatal."""
+    try:
+        import hashlib
+        from elimu_ai.db.repositories import RecommendationRepository
+        cache_key = "retry:" + hashlib.sha256(question.lower().strip().encode()).hexdigest()[:32]
+        RecommendationRepository().set_cached(
+            cache_key=cache_key,
+            result_json=answer,
+            ttl_hours=48,
+        )
+    except Exception as exc:
+        logger.debug("_cache_resolved_answer: %s", exc)
+
+
 # ── Task registry ─────────────────────────────────────────────────────────────
 
 _TASK_REGISTRY: List[Tuple[str, Callable[[], str], int]] = [
@@ -232,6 +383,7 @@ _TASK_REGISTRY: List[Tuple[str, Callable[[], str], int]] = [
     ("quiz_of_day",          task_generate_quiz_of_day,  86400),
     ("study_tip",            task_generate_study_tip,    43200),
     ("scheduler_self_heal",  task_scheduler_self_heal,   300),
+    ("retry_failed_queries", task_retry_failed_queries,  SCHEDULER_RETRY_FAILURES_INTERVAL),
 ]
 
 

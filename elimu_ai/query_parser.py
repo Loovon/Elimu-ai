@@ -171,11 +171,32 @@ class QueryParser:
         """
         Parse the question into structured queries.
         Always returns at least one ParsedQuery.
+
+        Optimisation: if deterministic regex parsing already extracts a
+        confident result (grade OR subject found, single-target), skip the
+        Gemini parse call entirely.  Gemini is only used when:
+          - the question contains no clear grade/subject
+          - multiple targets are separated by "and" but each part
+            is ambiguous (no grade/subject extracted per part)
+          - the regex fallback returns only an empty-field query
         """
         if not question or not question.strip():
             return [ParsedQuery(original=question)]
 
-        # Try Gemini-based parsing first
+        # ── Fast path: deterministic regex parse ──────────────────────────
+        regex_result = self._regex_parse(question)
+        # Consider the regex result "confident" when every returned query
+        # has at least one concrete field (grade or subject).
+        all_confident = all(q.grade or q.subject for q in regex_result)
+        if all_confident:
+            logger.debug(
+                "QueryParser: skipping Gemini — regex produced %d confident "
+                "quer%s", len(regex_result),
+                "y" if len(regex_result) == 1 else "ies",
+            )
+            return regex_result
+
+        # ── Slow path: Gemini disambiguation ─────────────────────────────
         try:
             queries = self._gemini_parse(question)
             if queries:
@@ -183,8 +204,8 @@ class QueryParser:
         except Exception as exc:
             logger.debug("QueryParser: Gemini parse failed: %s", exc)
 
-        # Fallback: regex-based
-        return self._regex_parse(question)
+        # Use the regex result even if imperfect
+        return regex_result
 
     def _gemini_parse(self, question: str) -> Optional[List[ParsedQuery]]:
         from elimu_ai.gemini import generate

@@ -138,10 +138,26 @@ class IntentAgent:
     Uses Gemini for rich understanding; falls back to keyword signals.
     """
 
+    # Minimum keyword-fallback confidence to skip Gemini classification.
+    # Value chosen from the actual signal weights in intent.py:
+    #   "schemes of work" → 0.95, "recommend" → 0.90, "quiz me" → 0.95
+    # 0.80 means a single strong unambiguous signal already covers the intent.
+    _SKIP_GEMINI_CONFIDENCE: float = 0.80
+    # Only skip Gemini when exactly ONE intent clears the threshold — compound
+    # queries with multiple confident intents still benefit from Gemini.
+    _MAX_SINGLE_INTENT_COUNT: int = 1
+
     def analyse(self, question: str) -> IntentAnalysis:
         """
         Analyse the user's question and return a full IntentAnalysis.
         Never raises — always returns something usable.
+
+        Optimisation: if deterministic keyword routing already produces a
+        single high-confidence intent (≥ _SKIP_GEMINI_CONFIDENCE), skip the
+        Gemini classification call entirely.  Gemini is only used when:
+          - the question is genuinely ambiguous
+          - multiple strong intents are present
+          - keyword confidence is below the threshold
         """
         if not question or not question.strip():
             return IntentAnalysis(
@@ -151,7 +167,19 @@ class IntentAgent:
                 reasoning="Empty query",
             )
 
-        # Try semantic classification first
+        # ── Fast path: deterministic keyword check ─────────────────────────
+        keyword_result = self._keyword_fallback(question)
+        high_conf = [i for i in keyword_result.intents
+                     if i.confidence >= self._SKIP_GEMINI_CONFIDENCE]
+        if len(high_conf) == self._MAX_SINGLE_INTENT_COUNT:
+            logger.debug(
+                "IntentAgent: skipping Gemini — single high-confidence intent "
+                "%r (%.2f) from keyword routing",
+                high_conf[0].name, high_conf[0].confidence,
+            )
+            return keyword_result
+
+        # ── Slow path: Gemini semantic classification ──────────────────────
         try:
             result = self._semantic_classify(question)
             if result:
@@ -160,7 +188,7 @@ class IntentAgent:
             logger.warning("IntentAgent: semantic classification failed: %s", exc)
 
         # Fallback to keyword signals
-        return self._keyword_fallback(question)
+        return keyword_result
 
     def _semantic_classify(self, question: str) -> Optional[IntentAnalysis]:
         """Use Gemini to classify intents semantically."""

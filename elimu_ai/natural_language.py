@@ -75,15 +75,28 @@ class NaturalLanguageWriter:
         """
         Rewrite the raw output.
         Returns the rewritten text — never raises.
+
+        Gemini rewrite is skipped when:
+          1. The result is a document/catalog list (URLs present) — light clean only.
+          2. The result is already clean plain text (no Markdown artifacts, no
+             robotic openers, sentences all under 200 chars) — rule-based clean only.
+
+        Gemini rewrite runs only for explanatory/conversational answers that have
+        genuine formatting issues or robotic phrasing.
         """
         if not raw or not raw.strip():
             return raw
 
-        # For document lists (catalog results), only do light cleaning
+        # Case 1: document list — preserve URLs, only strip artefacts
         if self._is_document_list(raw):
             return self._light_clean(raw)
 
-        # For explanations, use Gemini rewrite if available
+        # Case 2: already clean — skip Gemini, just normalise
+        if self._is_already_clean(raw):
+            logger.debug("NaturalLanguageWriter: skipping Gemini — output already clean")
+            return self._rule_based_clean(raw)
+
+        # Case 3: needs natural-language rewrite
         if use_gemini:
             try:
                 rewritten = self._gemini_rewrite(raw, question)
@@ -92,7 +105,7 @@ class NaturalLanguageWriter:
             except Exception as exc:
                 logger.debug("NaturalLanguageWriter: Gemini rewrite failed: %s", exc)
 
-        # Rule-based cleaning
+        # Rule-based cleaning as final fallback
         return self._rule_based_clean(raw)
 
     def _gemini_rewrite(self, raw: str, question: str) -> str:
@@ -114,6 +127,37 @@ class NaturalLanguageWriter:
             or "Here are the best matching materials" in text
             or "most relevant materials for" in text.lower()
         )
+
+    def _is_already_clean(self, text: str) -> bool:
+        """
+        Return True when the text needs no Gemini rewrite.
+        Criteria (ALL must pass):
+          - No Markdown bold/italic/heading/code-block patterns
+          - No robotic opener phrases
+          - No sentence longer than 250 chars (wall-of-text guard)
+          - Text is at least 20 characters (non-trivial)
+        """
+        if len(text.strip()) < 20:
+            return False  # too short to judge — let Gemini handle
+        # Markdown artefacts
+        md_patterns = [
+            r"\*{2,}",     # **bold**
+            r"_{2,}",      # __underline__
+            r"^#{1,6}\s",  # ## Heading
+            r"```",        # code block
+        ]
+        for pat in md_patterns:
+            if re.search(pat, text, re.MULTILINE):
+                return False
+        # Robotic openers
+        for pat in _ROBOTIC_OPENERS:
+            if re.search(pat, text[:200], re.IGNORECASE):
+                return False
+        # Wall-of-text sentences
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        if any(len(s) > 250 for s in sentences):
+            return False
+        return True
 
     def _light_clean(self, text: str) -> str:
         """Minimal cleaning — preserve URLs and document data exactly."""

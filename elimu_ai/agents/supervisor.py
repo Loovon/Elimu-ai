@@ -108,8 +108,19 @@ class SupervisorAgent:
             len(plan.steps), plan.estimated_tools,
         )
 
+        # ── Log agent decision (non-fatal) ────────────────────────────────
+        self._log_decision(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            question=question,
+            analysis=analysis,
+            plan=plan,
+        )
+
         # ── Phase 3: Build context ────────────────────────────────────────
-        ctx = self._build_context(question, analysis, history)
+        ctx = self._build_context(question, analysis, history,
+                                  session_id=session_id, user_id=user_id)
 
         # ── Phase 4: Execute with retry ───────────────────────────────────
         tool_outputs: Dict[str, str] = {}
@@ -246,11 +257,21 @@ class SupervisorAgent:
         question: str,
         analysis: IntentAnalysis,
         history: List[Dict],
+        session_id: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> Any:
         """Build the PromptContext for tool execution."""
         from elimu_ai.context_builder import build_context
         from elimu_ai.tools.teacher import extract_context_hints, extract_context_from_history
         from elimu_ai.qdrant_db import search as qdrant_search
+
+        # Restore prior session context if the worker just started
+        if session_id:
+            try:
+                from elimu_ai.memory import memory_store
+                memory_store.restore_session(session_id, user_id=user_id)
+            except Exception as exc:
+                logger.debug("Supervisor: session restore failed (non-fatal): %s", exc)
 
         ctx_hints = extract_context_hints(question)
         if history:
@@ -495,6 +516,41 @@ class SupervisorAgent:
             )
         except Exception as exc:
             logger.debug("Supervisor analytics: %s", exc)
+
+    def _log_decision(
+        self,
+        request_id: str,
+        session_id: Optional[str],
+        user_id: Optional[int],
+        question: str,
+        analysis: "IntentAnalysis",
+        plan: "ExecutionPlan",
+        confidence: float = 0.0,
+        had_error: bool = False,
+        execution_ms: int = 0,
+    ) -> None:
+        """
+        Persist the agent decision to ai_agent_decisions.
+        Non-fatal — never raises, never crashes the request pipeline.
+        """
+        try:
+            from elimu_ai.db.repositories import AgentLogRepository
+            top_conf = analysis.intents[0].confidence if analysis.intents else 0.0
+            AgentLogRepository().log_decision(
+                request_id=request_id,
+                session_id=session_id,
+                user_id=user_id,
+                question=question,
+                intents=analysis.intent_names,
+                plan_steps=[s.action for s in plan.steps],
+                tools_used=plan.estimated_tools,
+                persona=analysis.primary,
+                confidence=top_conf,
+                execution_ms=execution_ms,
+                had_error=had_error,
+            )
+        except Exception as exc:
+            logger.debug("Supervisor log_decision: %s", exc)
 
     def _update_memory(
         self,
