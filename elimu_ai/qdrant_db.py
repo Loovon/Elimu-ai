@@ -34,7 +34,7 @@ def _get_client():
         return None
     try:
         from qdrant_client import QdrantClient
-        _qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY or None)
+        _qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY or None,check_compatibility=False,)
         logger.info("Qdrant client initialised (collection=%s).", COLLECTION_NAME)
         return _qdrant
     except Exception as exc:
