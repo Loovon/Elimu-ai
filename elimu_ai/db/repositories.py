@@ -385,3 +385,167 @@ class AgentLogRepository:
                     " VALUES(%s,%s,%s)",
                     (status, json.dumps(report), _now()),
                 )
+
+
+# ── Proactive discussion activity tracking ────────────────────────────────────
+
+class ProactiveDiscussionRepository:
+    """
+    Tracks proactive community discussions using the existing ai_scheduler_log.
+    job_name = 'proactive_discussion'
+    result   = JSON: {persona, topic, status}
+    No new tables needed.
+    """
+
+    JOB_NAME = "proactive_discussion"
+
+    @_db_op
+    def log_discussion(
+        self,
+        persona: str,
+        topic: str,
+        status: str,
+        duration_ms: int = 0,
+        error: Optional[str] = None,
+    ) -> None:
+        from elimu_ai.db.connection import get_connection
+        result_json = json.dumps({"persona": persona, "topic": topic[:200], "status": status})
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO ai_scheduler_log"
+                    "(job_name,status,result,duration_ms,error,ran_at)"
+                    " VALUES(%s,%s,%s,%s,%s,%s)",
+                    (self.JOB_NAME, status,
+                     result_json, duration_ms, error, _now()),
+                )
+
+    @_db_op
+    def get_recent(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return recent proactive discussion log rows."""
+        from elimu_ai.db.connection import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT result, ran_at FROM ai_scheduler_log"
+                    " WHERE job_name=%s ORDER BY ran_at DESC LIMIT %s",
+                    (self.JOB_NAME, limit),
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return []
+        results = []
+        for r in rows:
+            try:
+                data = json.loads(r[0]) if r[0] else {}
+            except Exception:
+                data = {}
+            data["ran_at"] = r[1]
+            results.append(data)
+        return results
+
+    def get_recent_safe(self, limit: int = 20) -> List[Dict[str, Any]]:
+        result = self.get_recent(limit=limit)
+        return result if result is not None else []
+
+    @_db_op
+    def count_today(self) -> int:
+        """Count proactive discussions created today (UTC)."""
+        from elimu_ai.db.connection import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM ai_scheduler_log"
+                    " WHERE job_name=%s AND status='created_proactive_discussion'"
+                    " AND ran_at >= CURRENT_DATE",
+                    (self.JOB_NAME,),
+                )
+                row = cur.fetchone()
+        return row[0] if row else 0
+
+    def count_today_safe(self) -> int:
+        result = self.count_today()
+        return result if result is not None else 0
+
+    @_db_op
+    def seconds_since_last(self) -> Optional[float]:
+        """Return seconds since the last proactive discussion was created, or None."""
+        from elimu_ai.db.connection import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ran_at FROM ai_scheduler_log"
+                    " WHERE job_name=%s AND status='created_proactive_discussion'"
+                    " ORDER BY ran_at DESC LIMIT 1",
+                    (self.JOB_NAME,),
+                )
+                row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        from datetime import datetime, timezone
+        last = row[0]
+        if hasattr(last, "tzinfo") and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return (datetime.now(tz=timezone.utc) - last).total_seconds()
+
+    def seconds_since_last_safe(self) -> Optional[float]:
+        try:
+            return self.seconds_since_last()
+        except Exception:
+            return None
+
+    @_db_op
+    def seconds_since_persona_last_posted(self, persona: str) -> Optional[float]:
+        """Return seconds since a specific persona last created a discussion."""
+        from elimu_ai.db.connection import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ran_at FROM ai_scheduler_log"
+                    " WHERE job_name=%s AND status='created_proactive_discussion'"
+                    " AND result LIKE %s"
+                    " ORDER BY ran_at DESC LIMIT 1",
+                    (self.JOB_NAME, f'%"persona": "{persona}"%'),
+                )
+                row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        from datetime import datetime, timezone
+        last = row[0]
+        if hasattr(last, "tzinfo") and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return (datetime.now(tz=timezone.utc) - last).total_seconds()
+
+    def seconds_since_persona_last_posted_safe(self, persona: str) -> Optional[float]:
+        try:
+            return self.seconds_since_persona_last_posted(persona)
+        except Exception:
+            return None
+
+    @_db_op
+    def get_recent_topics(self, limit: int = 10) -> List[str]:
+        """Return a list of recent discussion topics for duplicate detection."""
+        from elimu_ai.db.connection import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT result FROM ai_scheduler_log"
+                    " WHERE job_name=%s AND status='created_proactive_discussion'"
+                    " ORDER BY ran_at DESC LIMIT %s",
+                    (self.JOB_NAME, limit),
+                )
+                rows = cur.fetchall()
+        topics = []
+        for r in (rows or []):
+            try:
+                data = json.loads(r[0]) if r[0] else {}
+                t = data.get("topic", "")
+                if t:
+                    topics.append(t)
+            except Exception:
+                pass
+        return topics
+
+    def get_recent_topics_safe(self, limit: int = 10) -> List[str]:
+        result = self.get_recent_topics(limit=limit)
+        return result if result is not None else []

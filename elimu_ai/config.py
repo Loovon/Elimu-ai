@@ -51,6 +51,14 @@ SCHEDULER_RETRY_FAILURES_INTERVAL: int = int(os.getenv("SCHEDULER_RETRY_FAILURES
 # Maximum number of retry attempts per failed query before giving up
 MAX_RETRY_ATTEMPTS: int = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
 
+# ── Proactive community generation rate limits ────────────────────────────────
+# Minimum seconds between proactive discussions (default: 4 hours)
+PROACTIVE_DISCUSSION_COOLDOWN: int = int(os.getenv("PROACTIVE_DISCUSSION_COOLDOWN", "14400"))
+# Maximum proactive discussions per calendar day (default: 4)
+MAX_PROACTIVE_DISCUSSIONS_PER_DAY: int = int(os.getenv("MAX_PROACTIVE_DISCUSSIONS_PER_DAY", "4"))
+# Minimum seconds before the same persona posts again (default: 12 hours)
+PERSONA_COOLDOWN: int = int(os.getenv("PERSONA_COOLDOWN", "43200"))
+
 # ── PostgreSQL ────────────────────────────────────────────────────────────────
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 

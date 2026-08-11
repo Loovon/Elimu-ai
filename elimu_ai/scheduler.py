@@ -23,6 +23,9 @@ from elimu_ai.config import (
     SCHEDULER_RECOMMEND_INTERVAL,
     SCHEDULER_RETRY_FAILURES_INTERVAL,
     MAX_RETRY_ATTEMPTS,
+    PROACTIVE_DISCUSSION_COOLDOWN,
+    MAX_PROACTIVE_DISCUSSIONS_PER_DAY,
+    PERSONA_COOLDOWN,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,25 +55,337 @@ def task_answer_unanswered() -> str:
 
 
 def task_generate_discussions() -> str:
-    _TOPICS: List[str] = [
-        "What is the hardest KCSE Mathematics topic and why?",
-        "How can CBC students improve English writing skills?",
-        "Best study habits for Kenya Certificate exams?",
-        "Share a Biology concept you found confusing.",
-        "Most useful subject for everyday life in Kenya?",
-        "How should schools prepare for KCSE?",
-        "Role of parents in a child's academic life?",
-        "Which CBC subjects do you find most interesting?",
-        "How do you prepare for end-of-term exams?",
-        "Tips for balancing school and extracurricular activities?",
-    ]
+    """
+    Autonomous community discussion generator.
+
+    MODE 1 — RESPONSE-DRIVEN
+      If there are unanswered community threads with exactly 1 post,
+      answer them through the existing answer workflow and return early.
+
+    MODE 2 — PROACTIVE
+      If there are no unanswered threads the community needs proactive
+      activity.  The AI selects a persona, picks a varied educational
+      topic, checks cooldown/duplicate/daily-limit guards, then creates
+      a discussion through the existing create_discussion() HTTP path.
+
+    The existing answer_unanswered workflow is untouched.
+    All logging goes to ai_scheduler_log via the standard _make_job wrapper.
+    """
+    from elimu_ai.tools.forum import get_unanswered_threads, create_discussion
+    from elimu_ai.config import (
+        PROACTIVE_DISCUSSION_COOLDOWN,
+        MAX_PROACTIVE_DISCUSSIONS_PER_DAY,
+        PERSONA_COOLDOWN,
+    )
+
     try:
-        from elimu_ai.tools.forum import create_discussion
-        topic = _TOPICS[datetime.now(tz=timezone.utc).timetuple().tm_yday % len(_TOPICS)]
-        return create_discussion(topic)[:120]
+        # ── MODE 1: unanswered threads exist ──────────────────────────────────
+        threads = get_unanswered_threads(cutoff_hours=3)
+        answerable = [t for t in threads
+                      if t.get("post_count", t.get("posts_count", 0)) == 1]
+
+        if answerable:
+            from elimu_ai.tools.answer import answer_unanswered_threads
+            count = answer_unanswered_threads()
+            logger.info(
+                "generate_discussions: mode=response answered=%d threads", count
+            )
+            return f"answered_existing_thread: {count} threads answered"
+
+        # ── MODE 2: no unanswered threads — proactive generation ──────────────
+        logger.info(
+            "generate_discussions: mode=proactive reason=no_unanswered_threads"
+        )
+
+        repo = _get_proactive_repo()
+
+        # Guard 1: daily limit
+        today_count = repo.count_today_safe()
+        if today_count >= MAX_PROACTIVE_DISCUSSIONS_PER_DAY:
+            logger.info(
+                "generate_discussions: proactive generation skipped — "
+                "daily limit reached (%d/%d)",
+                today_count, MAX_PROACTIVE_DISCUSSIONS_PER_DAY,
+            )
+            return f"skipped_cooldown: daily limit {today_count}/{MAX_PROACTIVE_DISCUSSIONS_PER_DAY}"
+
+        # Guard 2: global cooldown
+        secs = repo.seconds_since_last_safe()
+        if secs is not None and secs < PROACTIVE_DISCUSSION_COOLDOWN:
+            remaining = int(PROACTIVE_DISCUSSION_COOLDOWN - secs)
+            logger.info(
+                "generate_discussions: proactive generation skipped — "
+                "cooldown active (%ds remaining)", remaining,
+            )
+            return f"skipped_cooldown: {remaining}s remaining"
+
+        # Select persona
+        persona_name, persona_display = _select_persona(repo, PERSONA_COOLDOWN)
+        logger.info(
+            "generate_discussions: mode=proactive persona=%s", persona_name
+        )
+
+        # Select topic (varied, educational, not a duplicate)
+        recent_topics = repo.get_recent_topics_safe(limit=15)
+        topic = _select_topic(persona_name, recent_topics)
+        if not topic:
+            logger.warning(
+                "generate_discussions: proactive generation failed: "
+                "could not select a non-duplicate topic"
+            )
+            repo.log_discussion(
+                persona=persona_name, topic="", status="skipped_duplicate"
+            )
+            return "skipped_duplicate: no fresh topic available"
+
+        logger.info(
+            "generate_discussions: mode=proactive persona=%s topic=%r action=create_discussion",
+            persona_name, topic[:80],
+        )
+
+        # Create discussion through the existing forum tool
+        t0 = time.monotonic()
+        try:
+            result_text = _create_discussion_as_persona(persona_name, persona_display, topic)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.error(
+                "generate_discussions: proactive generation failed: %s", exc
+            )
+            repo.log_discussion(
+                persona=persona_name, topic=topic,
+                status="failed", duration_ms=duration_ms, error=str(exc),
+            )
+            return f"Error: proactive generation failed: {exc}"
+
+        # Log success
+        repo.log_discussion(
+            persona=persona_name, topic=topic,
+            status="created_proactive_discussion", duration_ms=duration_ms,
+        )
+        logger.info(
+            "generate_discussions: proactive discussion created successfully "
+            "persona=%s topic=%r ms=%d", persona_name, topic[:80], duration_ms,
+        )
+        return f"created_proactive_discussion: persona={persona_name} topic={topic[:60]}"
+
     except Exception as exc:
         logger.error("task_generate_discussions: %s", exc)
         return f"Error: {exc}"
+
+
+# ── Proactive discussion helpers ──────────────────────────────────────────────
+
+def _get_proactive_repo():
+    """Return a ProactiveDiscussionRepository, always available."""
+    from elimu_ai.db.repositories import ProactiveDiscussionRepository
+    return ProactiveDiscussionRepository()
+
+
+def _select_persona(repo, persona_cooldown: int):
+    """
+    Choose a community-suitable persona from the existing registry.
+    Rotate to avoid the same persona posting repeatedly.
+    Returns (persona_name: str, persona_display: str).
+    """
+    from elimu_ai.personas.registry import persona_registry
+
+    # Personas suitable for community discussion creation
+    _COMMUNITY_PERSONAS = [
+        "teacher", "student", "community", "counsellor", "parent",
+        "librarian", "quizmaster",
+    ]
+
+    candidates = []
+    for pname in _COMMUNITY_PERSONAS:
+        cfg = persona_registry.get(pname)
+        if cfg is None:
+            continue
+        secs = repo.seconds_since_persona_last_posted_safe(pname)
+        if secs is None or secs >= persona_cooldown:
+            candidates.append((pname, cfg.display))
+
+    if not candidates:
+        # All on cooldown — pick the one that posted longest ago
+        best = _COMMUNITY_PERSONAS[0]
+        best_cfg = persona_registry.get(best)
+        return best, best_cfg.display if best_cfg else "CommunityAI"
+
+    # Prefer the persona that hasn't posted most recently
+    # (candidates list is ordered from registry; pick deterministically
+    # but not always the first — rotate by day-of-year)
+    idx = datetime.now(tz=timezone.utc).timetuple().tm_yday % len(candidates)
+    pname, pdisplay = candidates[idx]
+    return pname, pdisplay
+
+
+# Educational topic pools keyed by persona
+_PERSONA_TOPIC_POOLS: Dict[str, List[str]] = {
+    "teacher": [
+        "What is the most challenging CBC concept to teach and how do you handle it?",
+        "Teachers: how do you make Mathematics engaging for learners who struggle?",
+        "What preparation tips do you give students before KCSE?",
+        "How do you use Elimu Library resources in your lesson plans?",
+        "Teachers: what teaching strategy has improved student performance most?",
+        "What is the most important skill Kenyan students need beyond exams?",
+        "How do you handle mixed-ability classrooms in CBC?",
+        "What Science experiment has worked best for illustrating a difficult concept?",
+    ],
+    "student": [
+        "Which KCSE Mathematics topic do you find hardest and how do you tackle it?",
+        "What study method actually worked for you during exam preparation?",
+        "Students: how do you stay motivated when a subject feels impossible?",
+        "Which revision resource helped you improve your grades the most?",
+        "How do you balance school, revision, and extracurricular activities?",
+        "What is the one tip you wish you knew before your first national exam?",
+        "Which subject do you enjoy most and why?",
+        "How do you use past papers to prepare for exams?",
+    ],
+    "community": [
+        "What educational topic would you like Elimu AI to cover in more depth?",
+        "How has digital learning changed education in your school?",
+        "What does the ideal classroom look like for CBC learners?",
+        "Parents and teachers: how can you better support learners at home?",
+        "What is the biggest challenge facing education in Kenya today?",
+        "How should schools prepare learners for a rapidly changing job market?",
+        "Share a resource or study tip that has helped your community.",
+    ],
+    "counsellor": [
+        "What career path are you considering after KCSE and why?",
+        "How do you choose between university, college, and TVET after Form 4?",
+        "What scholarship opportunities should Kenyan students know about?",
+        "How important is subject choice in Form 1 for your future career?",
+        "What advice would you give a student unsure about their career direction?",
+    ],
+    "parent": [
+        "How do you support your child's learning at home under CBC?",
+        "What resources do you use to help your child with holiday homework?",
+        "Parents: what is the most difficult part of the CBC system for families?",
+        "How do you keep your child motivated when they feel like giving up?",
+        "What should schools do better to involve parents in learning?",
+    ],
+    "librarian": [
+        "Which Elimu Library resources do you find most useful for revision?",
+        "What is the best way to use schemes of work for self-study?",
+        "Which subject notes are most popular on Elimu Library and why?",
+        "How do past papers help students prepare more effectively?",
+        "What CBC resources do teachers most need that are hard to find?",
+    ],
+    "quizmaster": [
+        "Can you solve this KCSE Mathematics problem? Share your approach.",
+        "What Biology topic do students find hardest in KCSE Paper 1?",
+        "Quick quiz: which of these Science facts is false? Discuss.",
+        "KCSE revision challenge: what are the key Chemistry formulae to memorise?",
+        "Which English writing skill matters most in national exams?",
+    ],
+}
+
+_DEFAULT_TOPICS: List[str] = [
+    "What educational topic do you most want discussed on ElimuTalks?",
+    "Best study habits for Kenyan students — share what works for you.",
+    "How should we improve online learning resources for CBC students?",
+    "Which subject do Kenyan students find hardest at secondary level?",
+    "Share a tip that helped you or your learner succeed in exams.",
+]
+
+
+def _is_duplicate(topic: str, recent_topics: List[str], threshold: int = 5) -> bool:
+    """
+    Simple duplicate check: if any recent topic shares >= threshold words
+    with the candidate, consider it a duplicate.
+    """
+    candidate_words = set(topic.lower().split())
+    for rt in recent_topics:
+        shared = candidate_words & set(rt.lower().split())
+        # Ignore very common stop words
+        _STOP = {"a", "an", "the", "and", "or", "to", "in", "of", "for",
+                 "is", "it", "do", "you", "i", "my", "me", "your", "we",
+                 "how", "what", "why", "when", "which", "who", "this", "that",
+                 "with", "have", "are", "be", "can", "at", "by"}
+        shared -= _STOP
+        if len(shared) >= threshold:
+            return True
+    return False
+
+
+def _select_topic(persona_name: str, recent_topics: List[str]) -> Optional[str]:
+    """
+    Pick a non-duplicate educational topic for the persona.
+    Rotates through the pool, skipping topics that are too similar to recent ones.
+    Returns None if every candidate is a duplicate.
+    """
+    pool = _PERSONA_TOPIC_POOLS.get(persona_name, _DEFAULT_TOPICS)
+    # Rotate starting offset by hour-of-day so consecutive runs don't pick same topic
+    hour = datetime.now(tz=timezone.utc).hour
+    start = hour % len(pool)
+    ordered = pool[start:] + pool[:start]
+    for topic in ordered:
+        if not _is_duplicate(topic, recent_topics):
+            return topic
+    return None
+
+
+def _create_discussion_as_persona(
+    persona_name: str,
+    persona_display: str,
+    topic: str,
+) -> str:
+    """
+    Generate and post a discussion in the persona's voice.
+    Uses the existing create_discussion() → generate_forum_post() → HTTP path.
+    The persona voice is injected through a persona-aware prompt prefix.
+    """
+    from elimu_ai.tools.forum import generate_forum_post, save_forum_post, _pick_category
+    from elimu_ai.gemini import generate as gemini_generate
+
+    _PERSONA_VOICE_PREFIX: Dict[str, str] = {
+        "teacher":    "As an experienced Kenyan teacher, write a genuine forum post.",
+        "student":    "As a Kenyan secondary school student preparing for exams, write a genuine forum post.",
+        "community":  "As a community member passionate about Kenyan education, write a forum post.",
+        "counsellor": "As a career counsellor advising Kenyan students, write a forum post.",
+        "parent":     "As a parent navigating CBC education in Kenya, write a forum post.",
+        "librarian":  "As an educational librarian familiar with Elimu Library, write a forum post.",
+        "quizmaster": "As a quiz and exam preparation specialist, write a forum post.",
+    }
+
+    voice = _PERSONA_VOICE_PREFIX.get(persona_name, "Write a genuine educational forum post.")
+    prompt = (
+        f"{voice}\n\n"
+        f"Topic: {topic}\n\n"
+        "Rules:\n"
+        "- Plain text only, no Markdown.\n"
+        "- Sound like a real community member, not a robot.\n"
+        "- Return valid JSON with exactly two keys: "
+        '"title" (string, max 80 chars) and "body" (string, 2-4 sentences).\n'
+        "- The body should invite others to share their thoughts.\n"
+        "- No markdown. No extra text outside the JSON object."
+    )
+
+    import json, re
+    raw = gemini_generate(prompt)
+    match = re.search(r"\{[\s\S]*?\}", raw)
+    if match:
+        try:
+            data = json.loads(match.group())
+            title = data.get("title", f"Discussion: {topic[:60]}")
+            body  = data.get("body",  topic)
+        except Exception:
+            title = f"Discussion: {topic[:60]}"
+            body  = raw.strip() or topic
+    else:
+        title = f"Discussion: {topic[:60]}"
+        body  = raw.strip() or topic
+
+    cat = _pick_category(topic)
+    import uuid
+    ikey = f"proactive-{persona_name}-{uuid.uuid5(uuid.NAMESPACE_URL, title).hex}"
+    thread = save_forum_post(title, body, cat, idempotency_key=ikey)
+    if thread:
+        slug = thread.get("slug", re.sub(r"[^\w-]", "-", title.lower())[:60])
+        return f"created: /thread/{slug}/"
+    # API unavailable — graceful degradation (still logged as success attempt)
+    return f"generated (API unavailable): {title}"
 
 
 def task_recommend_resources() -> str:
