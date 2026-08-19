@@ -422,27 +422,98 @@ def task_recommend_resources() -> str:
 
 
 def task_moderate_content() -> str:
-    """Scan recent posts for spam — via HTTP moderation endpoint."""
+    """
+    Scan recent posts for spam/policy violations.
+
+    Moderation uses the Django moderation API as the primary decision
+    and the local deterministic rules as a second safety layer.
+
+    The worker never writes directly to Django.
+    """
     try:
         from elimu_ai.http_client import get_client
         from elimu_ai.tools.moderation import moderate
 
         client = get_client()
-        # GET recent posts via the Django API
+
+        # Fetch posts created within the last hour.
         try:
-            data  = client.get("/api/ai/forum/recent-posts/", {"hours": "1"})
+            data = client.get(
+                "/api/ai/forum/recent-posts/",
+                {"hours": "1"},
+            )
             posts = data.get("results") or data.get("posts") or []
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "moderate_content: unable to fetch recent posts: %s",
+                exc,
+            )
             return "Django unavailable — moderation skipped."
 
         flagged = 0
+        django_flagged = 0
+        local_flagged = 0
+
         for post in posts:
-            content = post.get("content", "")
-            result  = moderate(content)
-            if result != "Content approved.":
-                logger.warning("moderate: post #%s flagged: %s", post.get("id"), result)
+            post_id = post.get("id")
+            content = str(post.get("content", "")).strip()
+
+            if not content:
+                continue
+
+            post_flagged = False
+
+            # ── Layer 1: Django moderation API ───────────────────────────
+            try:
+                result = client.check_moderation(content)
+
+                approved = result.get("approved", True)
+                action = str(result.get("action", "allow")).lower()
+                score = result.get("score", 0)
+                reason = result.get("reason", "")
+
+                if not approved or action not in ("allow", ""):
+                    post_flagged = True
+                    django_flagged += 1
+
+                    logger.warning(
+                        "moderation: Django flagged post #%s "
+                        "(action=%s score=%s reason=%s)",
+                        post_id,
+                        action,
+                        score,
+                        reason,
+                    )
+
+            except Exception as exc:
+                logger.warning(
+                    "moderation: Django check failed for post #%s: %s",
+                    post_id,
+                    exc,
+                )
+
+            # ── Layer 2: local deterministic safety rules ───────────────
+            local_result = moderate(content)
+
+            if local_result != "Content approved.":
+                post_flagged = True
+                local_flagged += 1
+
+                logger.warning(
+                    "moderation: local rules flagged post #%s: %s",
+                    post_id,
+                    local_result,
+                )
+
+            if post_flagged:
                 flagged += 1
-        return f"Scanned {len(posts)} posts, flagged {flagged}."
+
+        return (
+            f"Scanned {len(posts)} posts, "
+            f"flagged {flagged} "
+            f"(Django: {django_flagged}, local: {local_flagged})."
+        )
+
     except Exception as exc:
         logger.error("task_moderate_content: %s", exc)
         return f"Error: {exc}"
