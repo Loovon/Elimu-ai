@@ -211,6 +211,26 @@ class ElimuAPIClient:
         """GET /api/ai/forum/search/?q=<query>"""
         return self.get("/api/ai/forum/search/", {"q": query, "limit": str(limit)})
 
+    def get_thread_detail(self, thread_id: int) -> Dict[str, Any]:
+        """GET /api/ai/forum/threads/{id}/ — returns thread metadata + posts."""
+        return self.get(f"/api/ai/forum/threads/{thread_id}/")
+
+    def get_active_threads(
+        self,
+        min_posts: int = 2,
+        max_posts: int = 29,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """
+        GET /api/ai/forum/active/ — threads with activity below the growth target.
+        Returns threads that need continuation (min_posts < post_count < max_posts).
+        """
+        return self.get("/api/ai/forum/active/", {
+            "min_posts": str(min_posts),
+            "max_posts": str(max_posts),
+            "limit":     str(limit),
+        })
+
     def create_discussion(
         self,
         title: str,

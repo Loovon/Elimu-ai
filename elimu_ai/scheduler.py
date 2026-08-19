@@ -26,6 +26,11 @@ from elimu_ai.config import (
     PROACTIVE_DISCUSSION_COOLDOWN,
     MAX_PROACTIVE_DISCUSSIONS_PER_DAY,
     PERSONA_COOLDOWN,
+    THREAD_GROWTH_TARGET,
+    THREAD_MIN_POSTS_FOR_CONTINUATION,
+    THREAD_CONTINUATION_COOLDOWN,
+    SCHEDULER_ARTICLE_INTERVAL,
+    MAX_ARTICLES_PER_DAY,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,20 +63,19 @@ def task_generate_discussions() -> str:
     """
     Autonomous community discussion generator.
 
-    MODE 1 — RESPONSE-DRIVEN
-      If there are unanswered community threads with exactly 1 post,
-      answer them through the existing answer workflow and return early.
-
-    MODE 2 — PROACTIVE
-      If there are no unanswered threads the community needs proactive
-      activity.  The AI selects a persona, picks a varied educational
-      topic, checks cooldown/duplicate/daily-limit guards, then creates
-      a discussion through the existing create_discussion() HTTP path.
+    Decision flow (agentic):
+      1. Check for unanswered threads (post_count == 1) → answer them
+      2. Check for active threads below THREAD_GROWTH_TARGET → continue one
+      3. Proactive generation with forum-discovery guard:
+         a. Search existing threads for topic before creating
+         b. If relevant thread found → continue it instead
+         c. Rate-limit / cooldown / duplicate checks
+         d. Create new discussion in persona voice
 
     The existing answer_unanswered workflow is untouched.
     All logging goes to ai_scheduler_log via the standard _make_job wrapper.
     """
-    from elimu_ai.tools.forum import get_unanswered_threads, create_discussion
+    from elimu_ai.tools.forum import get_unanswered_threads
     from elimu_ai.config import (
         PROACTIVE_DISCUSSION_COOLDOWN,
         MAX_PROACTIVE_DISCUSSIONS_PER_DAY,
@@ -79,7 +83,7 @@ def task_generate_discussions() -> str:
     )
 
     try:
-        # ── MODE 1: unanswered threads exist ──────────────────────────────────
+        # ── STEP 1: unanswered threads exist → answer them ─────────────────
         threads = get_unanswered_threads(cutoff_hours=3)
         answerable = [t for t in threads
                       if t.get("post_count", t.get("posts_count", 0)) == 1]
@@ -92,14 +96,22 @@ def task_generate_discussions() -> str:
             )
             return f"answered_existing_thread: {count} threads answered"
 
-        # ── MODE 2: no unanswered threads — proactive generation ──────────────
+        # ── STEP 2: continue active threads below growth target ────────────
+        continuation_result = _try_continue_existing_thread()
+        if continuation_result:
+            logger.info(
+                "generate_discussions: mode=continue result=%r", continuation_result[:80]
+            )
+            return continuation_result
+
+        # ── STEP 3: proactive generation ───────────────────────────────────
         logger.info(
             "generate_discussions: mode=proactive reason=no_unanswered_threads"
         )
 
         repo = _get_proactive_repo()
 
-        # Guard 1: daily limit
+        # Guard: daily limit
         today_count = repo.count_today_safe()
         if today_count >= MAX_PROACTIVE_DISCUSSIONS_PER_DAY:
             logger.info(
@@ -109,7 +121,7 @@ def task_generate_discussions() -> str:
             )
             return f"skipped_cooldown: daily limit {today_count}/{MAX_PROACTIVE_DISCUSSIONS_PER_DAY}"
 
-        # Guard 2: global cooldown
+        # Guard: global cooldown
         secs = repo.seconds_since_last_safe()
         if secs is not None and secs < PROACTIVE_DISCUSSION_COOLDOWN:
             remaining = int(PROACTIVE_DISCUSSION_COOLDOWN - secs)
@@ -125,7 +137,7 @@ def task_generate_discussions() -> str:
             "generate_discussions: mode=proactive persona=%s", persona_name
         )
 
-        # Select topic (varied, educational, not a duplicate)
+        # Select topic
         recent_topics = repo.get_recent_topics_safe(limit=15)
         topic = _select_topic(persona_name, recent_topics)
         if not topic:
@@ -138,12 +150,46 @@ def task_generate_discussions() -> str:
             )
             return "skipped_duplicate: no fresh topic available"
 
+        # ── Forum discovery guard — search before creating ─────────────────
+        # If a highly relevant existing thread already exists, continue it
+        # instead of spawning a brand-new discussion.
+        existing_thread = _find_relevant_thread_for_topic(topic)
+        if existing_thread:
+            thread_id    = existing_thread.get("id")
+            thread_title = existing_thread.get("title", "")
+            thread_posts = existing_thread.get("post_count",
+                           existing_thread.get("posts_count", 0))
+
+            if thread_id and thread_posts < THREAD_GROWTH_TARGET:
+                cont_result = _post_continuation_reply(
+                    thread_id=thread_id,
+                    thread_title=thread_title,
+                    persona_name=persona_name,
+                    topic_context=topic,
+                )
+                if cont_result:
+                    repo.log_discussion(
+                        persona=persona_name,
+                        topic=f"[continuation] {thread_title}",
+                        status="created_proactive_discussion",
+                    )
+                    logger.info(
+                        "generate_discussions: continued existing thread=%d "
+                        "instead of creating new persona=%s",
+                        thread_id, persona_name,
+                    )
+                    return (
+                        f"created_proactive_discussion: continued existing thread "
+                        f"id={thread_id} persona={persona_name}"
+                    )
+
         logger.info(
-            "generate_discussions: mode=proactive persona=%s topic=%r action=create_discussion",
+            "generate_discussions: mode=proactive persona=%s topic=%r "
+            "action=create_discussion",
             persona_name, topic[:80],
         )
 
-        # Create discussion through the existing forum tool
+        # Create new discussion
         t0 = time.monotonic()
         try:
             result_text = _create_discussion_as_persona(persona_name, persona_display, topic)
@@ -159,7 +205,6 @@ def task_generate_discussions() -> str:
             )
             return f"Error: proactive generation failed: {exc}"
 
-        # Log success
         repo.log_discussion(
             persona=persona_name, topic=topic,
             status="created_proactive_discussion", duration_ms=duration_ms,
@@ -181,6 +226,142 @@ def _get_proactive_repo():
     """Return a ProactiveDiscussionRepository, always available."""
     from elimu_ai.db.repositories import ProactiveDiscussionRepository
     return ProactiveDiscussionRepository()
+
+
+def _find_relevant_thread_for_topic(topic: str) -> Optional[Dict]:
+    """
+    Search existing forum threads for a topic before creating a new discussion.
+    Returns the best-matching thread if found with similarity >= 0.4, else None.
+    Prevents duplicate discussions when a suitable one already exists.
+    """
+    try:
+        from elimu_ai.tools.forum import find_relevant_existing_thread
+        return find_relevant_existing_thread(topic, similarity_threshold=0.4)
+    except Exception as exc:
+        logger.debug("_find_relevant_thread_for_topic: %s", exc)
+        return None
+
+
+def _try_continue_existing_thread() -> Optional[str]:
+    """
+    Look for active threads below the growth target and post a meaningful reply.
+    Returns a result string if a continuation was posted, else None.
+    """
+    try:
+        from elimu_ai.tools.forum import get_active_threads_for_growth
+        from elimu_ai.config import (
+            THREAD_GROWTH_TARGET,
+            THREAD_MIN_POSTS_FOR_CONTINUATION,
+            THREAD_CONTINUATION_COOLDOWN,
+            PERSONA_COOLDOWN,
+        )
+
+        threads = get_active_threads_for_growth(
+            min_posts=THREAD_MIN_POSTS_FOR_CONTINUATION,
+            max_posts=THREAD_GROWTH_TARGET - 1,
+            limit=5,
+        )
+        if not threads:
+            return None
+
+        # Pick the first thread (most recently active by default from API)
+        repo = _get_proactive_repo()
+        persona_name, _ = _select_persona(repo, PERSONA_COOLDOWN)
+
+        for thread in threads:
+            thread_id    = thread.get("id")
+            thread_title = thread.get("title", "")
+            post_count   = thread.get("post_count", thread.get("posts_count", 0))
+            if not thread_id or not thread_title:
+                continue
+
+            result = _post_continuation_reply(
+                thread_id=thread_id,
+                thread_title=thread_title,
+                persona_name=persona_name,
+                topic_context=thread_title,
+            )
+            if result:
+                logger.info(
+                    "generate_discussions: continued thread=%d posts=%d/%d persona=%s",
+                    thread_id, post_count, THREAD_GROWTH_TARGET, persona_name,
+                )
+                return (
+                    f"continued_existing_thread: id={thread_id} "
+                    f"posts={post_count}/{THREAD_GROWTH_TARGET} "
+                    f"persona={persona_name}"
+                )
+
+        return None
+
+    except Exception as exc:
+        logger.debug("_try_continue_existing_thread: %s", exc)
+        return None
+
+
+def _post_continuation_reply(
+    thread_id: int,
+    thread_title: str,
+    persona_name: str,
+    topic_context: str = "",
+) -> bool:
+    """
+    Generate and post a meaningful continuation reply to an existing thread.
+    Uses moderation gate. Returns True if posted successfully.
+    """
+    from elimu_ai.tools.forum import post_moderated_reply
+    from elimu_ai.gemini import generate as gemini_generate
+
+    _CONTINUATION_VOICE = {
+        "teacher":    "As an experienced Kenyan teacher, add a useful educational contribution to this discussion.",
+        "student":    "As a Kenyan student, share a genuine perspective or question about this topic.",
+        "community":  "As a community member, add a relevant point to keep this discussion going.",
+        "counsellor": "As a career counsellor, provide practical guidance related to this topic.",
+        "parent":     "As a Kenyan parent, share your perspective on this educational topic.",
+        "librarian":  "As a librarian, suggest resources or additional information for this discussion.",
+        "quizmaster": "As an exam preparation specialist, add a useful tip or question to this discussion.",
+    }
+
+    voice = _CONTINUATION_VOICE.get(
+        persona_name,
+        "Add a useful educational point to this discussion.",
+    )
+    context = topic_context or thread_title
+
+    prompt = (
+        f"{voice}\n\n"
+        f"Discussion title: {thread_title}\n"
+        f"Context: {context[:200]}\n\n"
+        "Rules:\n"
+        "- Plain text only, no Markdown.\n"
+        "- 2-4 sentences maximum.\n"
+        "- Sound like a genuine community member, not a robot.\n"
+        "- Either answer a question, share an insight, or invite others to respond.\n"
+        "- Do not just summarise the title — add real value.\n"
+        "- No greetings like 'Hello everyone'."
+    )
+
+    import uuid
+    ikey = f"continuation-{thread_id}-{persona_name}-{uuid.uuid4().hex[:8]}"
+
+    try:
+        reply = gemini_generate(prompt)
+        if not reply or reply.startswith("Elimu AI") or reply.startswith("Gemini error"):
+            return False
+        reply = reply.strip()
+        if len(reply) < 30:
+            return False
+
+        ok = post_moderated_reply(
+            thread_id=thread_id,
+            content=reply,
+            persona_name=persona_name,
+            idempotency_key=ikey,
+        )
+        return ok
+    except Exception as exc:
+        logger.debug("_post_continuation_reply: thread=%d error=%s", thread_id, exc)
+        return False
 
 
 def _select_persona(repo, persona_cooldown: int):
@@ -607,6 +788,50 @@ def task_scheduler_self_heal() -> str:
     return "Scheduler healthy."
 
 
+def task_generate_article() -> str:
+    """
+    Generate one educational article autonomously.
+
+    Decision flow:
+      1. Check daily article limit (MAX_ARTICLES_PER_DAY)
+      2. Find a non-duplicate topic from article pool
+      3. Retrieve supporting Elimu Library resources
+      4. Generate article with Gemini
+      5. Moderate before logging
+
+    Articles are idempotent — logged to ai_scheduler_log with job_name='generate_article'.
+    """
+    try:
+        from elimu_ai.tools.article import generate_educational_article
+        result = generate_educational_article()
+        logger.info("task_generate_article: %s", result[:120])
+        return result
+    except Exception as exc:
+        logger.error("task_generate_article: %s", exc)
+        return f"Error: {exc}"
+
+
+def task_continue_discussions() -> str:
+    """
+    Autonomously continue existing forum discussions toward the 30-post target.
+
+    Finds threads that are active but below THREAD_GROWTH_TARGET and posts
+    a meaningful persona-voiced contribution.
+
+    This runs independently of task_generate_discussions so that growth
+    activity and new-discussion creation don't compete for the same time slot.
+    """
+    try:
+        result = _try_continue_existing_thread()
+        if result:
+            logger.info("task_continue_discussions: %s", result[:120])
+            return result
+        return "continue_discussions: no threads requiring continuation"
+    except Exception as exc:
+        logger.error("task_continue_discussions: %s", exc)
+        return f"Error: {exc}"
+
+
 def task_retry_failed_queries() -> str:
     """
     Retry previously unanswered/failed library queries.
@@ -761,6 +986,8 @@ def _cache_resolved_answer(question: str, answer: str) -> None:
 _TASK_REGISTRY: List[Tuple[str, Callable[[], str], int]] = [
     ("answer_unanswered",    task_answer_unanswered,    SCHEDULER_ANSWER_INTERVAL),
     ("generate_discussions", task_generate_discussions,  SCHEDULER_DISCUSS_INTERVAL),
+    ("continue_discussions", task_continue_discussions,  THREAD_CONTINUATION_COOLDOWN),
+    ("generate_article",     task_generate_article,      SCHEDULER_ARTICLE_INTERVAL),
     ("recommend_resources",  task_recommend_resources,   SCHEDULER_RECOMMEND_INTERVAL),
     ("moderate_content",     task_moderate_content,      SCHEDULER_MODERATE_INTERVAL),
     ("catalog_sync",         task_catalog_sync,          SCHEDULER_CATALOG_INTERVAL),

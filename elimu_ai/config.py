@@ -59,6 +59,20 @@ MAX_PROACTIVE_DISCUSSIONS_PER_DAY: int = int(os.getenv("MAX_PROACTIVE_DISCUSSION
 # Minimum seconds before the same persona posts again (default: 12 hours)
 PERSONA_COOLDOWN: int = int(os.getenv("PERSONA_COOLDOWN", "43200"))
 
+# ── Thread growth / continuation ──────────────────────────────────────────────
+# Target number of meaningful posts per discussion thread
+THREAD_GROWTH_TARGET: int = int(os.getenv("THREAD_GROWTH_TARGET", "30"))
+# Minimum posts before a thread is considered worth continuing (has existing engagement)
+THREAD_MIN_POSTS_FOR_CONTINUATION: int = int(os.getenv("THREAD_MIN_POSTS_FOR_CONTINUATION", "2"))
+# Minimum seconds between AI continuation posts in the same thread
+THREAD_CONTINUATION_COOLDOWN: int = int(os.getenv("THREAD_CONTINUATION_COOLDOWN", "7200"))
+
+# ── Article generation ────────────────────────────────────────────────────────
+# How often to generate an article (default: 24 hours)
+SCHEDULER_ARTICLE_INTERVAL: int = int(os.getenv("SCHEDULER_ARTICLE_INTERVAL", "86400"))
+# Maximum articles per calendar day
+MAX_ARTICLES_PER_DAY: int = int(os.getenv("MAX_ARTICLES_PER_DAY", "2"))
+
 # ── PostgreSQL ────────────────────────────────────────────────────────────────
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 

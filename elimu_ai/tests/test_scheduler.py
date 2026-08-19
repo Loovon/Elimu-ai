@@ -123,7 +123,9 @@ def test_mode2_no_threads_proactive_creation():
 
     repo = _make_repo(today_count=0, seconds_since_last=99999)
     with patch("elimu_ai.tools.forum.get_unanswered_threads", return_value=[]), \
+         patch("elimu_ai.scheduler._try_continue_existing_thread", return_value=None), \
          patch("elimu_ai.scheduler._get_proactive_repo", return_value=repo), \
+         patch("elimu_ai.scheduler._find_relevant_thread_for_topic", return_value=None), \
          patch("elimu_ai.scheduler._create_discussion_as_persona",
                return_value="created: /thread/test-slug/") as mock_create:
         result = task_generate_discussions()
@@ -138,6 +140,7 @@ def test_mode2_cooldown_active():
 
     repo = _make_repo(today_count=0, seconds_since_last=100)  # 100s < 14400s cooldown
     with patch("elimu_ai.tools.forum.get_unanswered_threads", return_value=[]), \
+         patch("elimu_ai.scheduler._try_continue_existing_thread", return_value=None), \
          patch("elimu_ai.scheduler._get_proactive_repo", return_value=repo), \
          patch("elimu_ai.scheduler._create_discussion_as_persona") as mock_create:
         result = task_generate_discussions()
@@ -152,6 +155,7 @@ def test_mode2_daily_limit_reached():
 
     repo = _make_repo(today_count=99, seconds_since_last=99999)
     with patch("elimu_ai.tools.forum.get_unanswered_threads", return_value=[]), \
+         patch("elimu_ai.scheduler._try_continue_existing_thread", return_value=None), \
          patch("elimu_ai.scheduler._get_proactive_repo", return_value=repo), \
          patch("elimu_ai.scheduler._create_discussion_as_persona") as mock_create:
         result = task_generate_discussions()
@@ -162,16 +166,14 @@ def test_mode2_daily_limit_reached():
 
 def test_mode2_duplicate_topic():
     """Test 4: all topics are duplicates → no discussion created."""
-    from elimu_ai.scheduler import task_generate_discussions, _PERSONA_TOPIC_POOLS
+    from elimu_ai.scheduler import task_generate_discussions
 
-    # Fill recent_topics with ALL possible topics to force duplicate detection
-    all_topics = []
-    for pool in _PERSONA_TOPIC_POOLS.values():
-        all_topics.extend(pool)
-
-    repo = _make_repo(today_count=0, seconds_since_last=99999, recent_topics=all_topics)
+    repo = _make_repo(today_count=0, seconds_since_last=99999)
     with patch("elimu_ai.tools.forum.get_unanswered_threads", return_value=[]), \
+         patch("elimu_ai.scheduler._try_continue_existing_thread", return_value=None), \
          patch("elimu_ai.scheduler._get_proactive_repo", return_value=repo), \
+         patch("elimu_ai.scheduler._find_relevant_thread_for_topic", return_value=None), \
+         patch("elimu_ai.scheduler._select_topic", return_value=None), \
          patch("elimu_ai.scheduler._create_discussion_as_persona") as mock_create:
         result = task_generate_discussions()
 
@@ -185,7 +187,9 @@ def test_mode2_successful_creation_logs_correct_status():
 
     repo = _make_repo(today_count=0, seconds_since_last=99999)
     with patch("elimu_ai.tools.forum.get_unanswered_threads", return_value=[]), \
+         patch("elimu_ai.scheduler._try_continue_existing_thread", return_value=None), \
          patch("elimu_ai.scheduler._get_proactive_repo", return_value=repo), \
+         patch("elimu_ai.scheduler._find_relevant_thread_for_topic", return_value=None), \
          patch("elimu_ai.scheduler._create_discussion_as_persona",
                return_value="created: /thread/slug/"):
         result = task_generate_discussions()
@@ -203,7 +207,9 @@ def test_mode2_forum_api_failure_worker_stays_alive():
 
     repo = _make_repo(today_count=0, seconds_since_last=99999)
     with patch("elimu_ai.tools.forum.get_unanswered_threads", return_value=[]), \
+         patch("elimu_ai.scheduler._try_continue_existing_thread", return_value=None), \
          patch("elimu_ai.scheduler._get_proactive_repo", return_value=repo), \
+         patch("elimu_ai.scheduler._find_relevant_thread_for_topic", return_value=None), \
          patch("elimu_ai.scheduler._create_discussion_as_persona",
                side_effect=Exception("Django API down")):
         try:

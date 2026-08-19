@@ -217,3 +217,154 @@ def check_django_available() -> bool:
         return resp.get("status") in ("ok", "healthy", True)
     except Exception:
         return False
+
+
+# ── Thread discovery (semantic-aware) ────────────────────────────────────────
+
+def find_relevant_existing_thread(
+    topic: str,
+    similarity_threshold: float = 0.3,
+) -> Optional[Dict]:
+    """
+    Find the most semantically relevant existing forum thread for a topic.
+
+    Returns the best-matching thread dict if found (with keys: id, title,
+    slug, post_count, category_name), or None if no relevant thread exists.
+
+    This prevents creating duplicate discussions when a suitable one exists.
+    Uses title-word overlap as a lightweight semantic signal (no Gemini call).
+    """
+    try:
+        from elimu_ai.http_client import get_client
+        client = get_client()
+        data = client.search_threads(query=topic, limit=10)
+        threads = data.get("results") or data.get("threads") or []
+        if not threads:
+            return None
+
+        topic_words = set(w.lower() for w in topic.split() if len(w) > 3)
+        # Remove stop words
+        _STOP = {"what", "which", "that", "this", "with", "have", "does",
+                 "should", "would", "could", "about", "from", "your", "their",
+                 "they", "them", "when", "where", "will", "been", "more",
+                 "most", "some", "very", "just", "also", "only", "much"}
+        topic_words -= _STOP
+        if not topic_words:
+            return None
+
+        best_thread = None
+        best_score = 0.0
+
+        for t in threads:
+            title = t.get("title", "")
+            title_words = set(w.lower() for w in title.split() if len(w) > 3)
+            title_words -= _STOP
+            if not title_words:
+                continue
+            shared = topic_words & title_words
+            score = len(shared) / max(len(topic_words), len(title_words))
+            if score > best_score:
+                best_score = score
+                best_thread = t
+
+        if best_thread and best_score >= similarity_threshold:
+            logger.info(
+                "forum.find_relevant_existing_thread: found match %r "
+                "(score=%.2f) for topic=%r",
+                best_thread.get("title", "")[:60],
+                best_score,
+                topic[:60],
+            )
+            return best_thread
+
+        return None
+
+    except Exception as exc:
+        logger.warning("forum.find_relevant_existing_thread: %s", exc)
+        return None
+
+
+def get_active_threads_for_growth(
+    min_posts: int = 2,
+    max_posts: int = 29,
+    limit: int = 10,
+) -> List[Dict]:
+    """
+    Fetch threads that are active but have not yet reached the growth target.
+    Returns threads suitable for AI continuation.
+    """
+    try:
+        from elimu_ai.http_client import get_client
+        client = get_client()
+        data = client.get_active_threads(
+            min_posts=min_posts,
+            max_posts=max_posts,
+            limit=limit,
+        )
+        return data.get("results") or data.get("threads") or []
+    except Exception as exc:
+        logger.warning("forum.get_active_threads_for_growth: %s", exc)
+        return []
+
+
+def get_thread_context(thread_id: int) -> Optional[Dict]:
+    """
+    Fetch full thread context (title, posts, category) for a given thread ID.
+    Returns None if the API is unavailable.
+    """
+    try:
+        from elimu_ai.http_client import get_client
+        client = get_client()
+        return client.get_thread_detail(thread_id)
+    except Exception as exc:
+        logger.warning("forum.get_thread_context: thread=%d error=%s", thread_id, exc)
+        return None
+
+
+def post_moderated_reply(
+    thread_id: int,
+    content: str,
+    persona_name: str = "community",
+    idempotency_key: Optional[str] = None,
+) -> bool:
+    """
+    Post a reply to an existing thread AFTER passing local moderation.
+    Returns True on success, False if moderation fails or API is unavailable.
+
+    This is the safe posting path for all AI-generated content:
+      1. Local moderation check
+      2. Django API moderation check (best-effort)
+      3. Post via HTTP
+    """
+    from elimu_ai.tools.moderation import moderate
+
+    # Layer 1: local moderation
+    local_result = moderate(content)
+    if local_result != "Content approved.":
+        logger.warning(
+            "forum.post_moderated_reply: local moderation blocked post to thread %d: %s",
+            thread_id, local_result,
+        )
+        return False
+
+    # Layer 2: Django API moderation (best-effort, never blocks if API down)
+    try:
+        from elimu_ai.http_client import get_client
+        client = get_client()
+        mod_result = client.check_moderation(content)
+        approved = mod_result.get("approved", True)
+        if not approved:
+            action = mod_result.get("action", "")
+            logger.warning(
+                "forum.post_moderated_reply: Django moderation blocked post to thread %d "
+                "(action=%s)", thread_id, action,
+            )
+            return False
+    except Exception as exc:
+        logger.debug(
+            "forum.post_moderated_reply: Django moderation check failed (non-fatal): %s", exc
+        )
+        # Continue — local moderation already passed
+
+    # Layer 3: post reply
+    return post_ai_answer(thread_id, content, idempotency_key=idempotency_key)
