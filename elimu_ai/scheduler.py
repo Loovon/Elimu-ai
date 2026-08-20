@@ -935,25 +935,147 @@ def task_generate_article() -> str:
         return f"Error: {exc}"
 
 
+def _participate_unanswered_thread(
+    skip_thread_id: Optional[int] = None,
+) -> Optional[str]:
+    """
+    Select one unanswered or low-reply forum thread and post a meaningful
+    named-persona reply.
+
+    Selection criteria:
+      - Prefer threads with post_count == 1 (only opening post, no replies yet)
+      - Also consider low-reply threads with post_count 2–3
+      - Skip skip_thread_id (already used in this cycle)
+      - Use randomised selection within the candidate set to avoid always
+        picking the same thread across consecutive scheduler cycles
+      - Respect existing moderation and idempotency via _post_continuation_reply
+
+    Persona: uses existing LRU _select_persona() — persona_key flows through
+    the full pipeline to Django so the named persona appears as author.
+
+    Returns a result string, or None if no eligible thread was found.
+    """
+    import random as _random
+
+    try:
+        from elimu_ai.tools.forum import get_unanswered_threads
+        from elimu_ai.config import PERSONA_COOLDOWN
+
+        # Fetch recent unanswered threads (24h window to catch older ones too)
+        threads = get_unanswered_threads(cutoff_hours=24)
+        if not threads:
+            return None
+
+        # Build candidate list: post_count 1–3, not the already-used thread
+        candidates = []
+        for t in threads:
+            tid = t.get("id")
+            if not tid:
+                continue
+            if skip_thread_id is not None and tid == skip_thread_id:
+                continue
+            pc = t.get("post_count", t.get("posts_count", 0))
+            if 1 <= pc <= 3:
+                candidates.append(t)
+
+        if not candidates:
+            return None
+
+        # Random selection within candidates — avoids always picking same thread
+        thread = _random.choice(candidates)
+        thread_id    = thread.get("id")
+        thread_title = thread.get("title", "")
+        post_count   = thread.get("post_count", thread.get("posts_count", 0))
+
+        if not thread_id or not thread_title:
+            return None
+
+        # Select persona via existing LRU mechanism
+        repo = _get_proactive_repo()
+        persona_key, _ = _select_persona(repo, PERSONA_COOLDOWN)
+
+        # Generate and post reply through existing named-persona pipeline
+        # _post_continuation_reply passes persona_key → post_moderated_reply
+        # → post_ai_answer → ElimuAPIClient.post_answer(persona_key=...)
+        ok = _post_continuation_reply(
+            thread_id=thread_id,
+            thread_title=thread_title,
+            persona_name=persona_key,      # stable NamedPersona key
+            topic_context=thread_title,
+        )
+
+        if not ok:
+            logger.info(
+                "_participate_unanswered_thread: reply blocked or failed "
+                "thread=%d persona=%s",
+                thread_id, persona_key,
+            )
+            return None
+
+        logger.info(
+            "_participate_unanswered_thread: replied thread=%d posts=%d "
+            "persona_key=%s",
+            thread_id, post_count, persona_key,
+        )
+        return (
+            f"participated_unanswered_thread: "
+            f"id={thread_id} posts={post_count} persona={persona_key}"
+        )
+
+    except Exception as exc:
+        logger.debug("_participate_unanswered_thread: %s", exc)
+        return None
+
+
 def task_continue_discussions() -> str:
     """
-    Autonomously continue existing forum discussions toward the 30-post target.
+    Autonomously continue existing forum discussions toward the 30-post target,
+    AND participate in one eligible unanswered/low-reply thread in the same cycle.
 
-    Finds threads that are active but below THREAD_GROWTH_TARGET and posts
-    a meaningful persona-voiced contribution.
+    Behavior:
+      Step 1: Continue an existing AI-managed thread below THREAD_GROWTH_TARGET
+              (preserves the 30-post growth mechanism)
+      Step 2: Select one unanswered or low-reply thread and post a meaningful
+              named-persona reply (adds breadth without removing depth)
 
-    This runs independently of task_generate_discussions so that growth
-    activity and new-discussion creation don't compete for the same time slot.
+    Both steps use the existing named persona pipeline:
+      persona_key → voice → Gemini → post_moderated_reply → post_ai_answer
+      → ElimuAPIClient → Django API (persona_key in payload)
+
+    If step 1 has no eligible thread, step 2 still runs.
+    If step 2 has no eligible thread, step 1 result is still returned.
     """
+    results = []
+
+    # ── Step 1: continue an existing <30-post thread ──────────────────────────
     try:
-        result = _try_continue_existing_thread()
-        if result:
-            logger.info("task_continue_discussions: %s", result[:120])
-            return result
-        return "continue_discussions: no threads requiring continuation"
+        cont_result = _try_continue_existing_thread()
+        if cont_result:
+            logger.info("task_continue_discussions [step1]: %s", cont_result[:120])
+            results.append(cont_result)
     except Exception as exc:
-        logger.error("task_continue_discussions: %s", exc)
-        return f"Error: {exc}"
+        logger.error("task_continue_discussions [step1]: %s", exc)
+
+    # ── Step 2: participate in an unanswered / low-reply thread ───────────────
+    try:
+        # Do not re-use the thread already continued in step 1
+        already_used_id = None
+        if results:
+            import re as _re
+            m = _re.search(r"id=(\d+)", results[0])
+            if m:
+                already_used_id = int(m.group(1))
+
+        part_result = _participate_unanswered_thread(skip_thread_id=already_used_id)
+        if part_result:
+            logger.info("task_continue_discussions [step2]: %s", part_result[:120])
+            results.append(part_result)
+    except Exception as exc:
+        logger.error("task_continue_discussions [step2]: %s", exc)
+
+    if results:
+        return " | ".join(results)
+    return "continue_discussions: no threads requiring continuation"
 
 
 def task_retry_failed_queries() -> str:
