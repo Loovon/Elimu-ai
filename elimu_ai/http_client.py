@@ -242,8 +242,9 @@ class ElimuAPIClient:
         """
         POST /api/ai/forum/discussions/
 
-        persona_key is passed to Django so the thread can be attributed
-        to the correct named AI persona account rather than a generic AI user.
+        persona_key is the stable NamedPersona key (e.g. "student_01").
+        We also send ai_username (the Django username slug) and ai_display_name
+        so the backend can resolve the author regardless of which field it reads.
         If None, Django falls back to the default AI author.
         """
         key = idempotency_key or f"ai-discussion-{uuid.uuid5(uuid.NAMESPACE_URL, title).hex}"
@@ -255,6 +256,16 @@ class ElimuAPIClient:
         }
         if persona_key:
             payload["persona_key"] = persona_key
+            # Resolve the stable username and display name for Django user lookup
+            try:
+                from elimu_ai.personas.named import get_persona
+                p = get_persona(persona_key)
+                if p:
+                    payload["ai_username"]     = p.username
+                    payload["ai_display_name"] = p.display_name
+                    payload["ai_role"]         = p.role
+            except Exception:
+                pass
         return self.post("/api/ai/forum/discussions/", payload, idempotency_key=key)
 
     def post_answer(
@@ -269,6 +280,7 @@ class ElimuAPIClient:
         Idempotency-Key prevents duplicate answers on network retries.
 
         persona_key identifies the named AI persona posting this reply.
+        We also send ai_username for Django user resolution.
         """
         key = idempotency_key or f"ai-forum-answer-{thread_id}"
         payload: Dict[str, Any] = {
@@ -278,6 +290,15 @@ class ElimuAPIClient:
         }
         if persona_key:
             payload["persona_key"] = persona_key
+            try:
+                from elimu_ai.personas.named import get_persona
+                p = get_persona(persona_key)
+                if p:
+                    payload["ai_username"]     = p.username
+                    payload["ai_display_name"] = p.display_name
+                    payload["ai_role"]         = p.role
+            except Exception:
+                pass
         return self.post("/api/ai/forum/answers/", payload, idempotency_key=key)
 
     def check_moderation(self, content: str) -> Dict[str, Any]:

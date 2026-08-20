@@ -42,7 +42,9 @@ RAG_CANDIDATES: int = int(os.getenv("RAG_CANDIDATES", "30"))  # candidates befor
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 SCHEDULER_ANSWER_INTERVAL: int    = int(os.getenv("SCHEDULER_ANSWER_INTERVAL",    "1800"))
-SCHEDULER_DISCUSS_INTERVAL: int   = int(os.getenv("SCHEDULER_DISCUSS_INTERVAL",   "86400"))
+# generate_discussions: new proactive discussion every 4 hours
+# (6 possible windows/day, guarded by MAX_PROACTIVE_DISCUSSIONS_PER_DAY=3)
+SCHEDULER_DISCUSS_INTERVAL: int   = int(os.getenv("SCHEDULER_DISCUSS_INTERVAL",   "14400"))
 SCHEDULER_RECOMMEND_INTERVAL: int = int(os.getenv("SCHEDULER_RECOMMEND_INTERVAL", "3600"))
 SCHEDULER_MODERATE_INTERVAL: int  = int(os.getenv("SCHEDULER_MODERATE_INTERVAL",  "900"))
 SCHEDULER_CATALOG_INTERVAL: int   = int(os.getenv("SCHEDULER_CATALOG_INTERVAL",   "43200"))
@@ -52,25 +54,27 @@ SCHEDULER_RETRY_FAILURES_INTERVAL: int = int(os.getenv("SCHEDULER_RETRY_FAILURES
 MAX_RETRY_ATTEMPTS: int = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
 
 # ── Proactive community generation rate limits ────────────────────────────────
-# Minimum seconds between proactive discussions (default: 4 hours)
+# Minimum seconds between proactive discussions (default: 4 hours — matches SCHEDULER_DISCUSS_INTERVAL)
 PROACTIVE_DISCUSSION_COOLDOWN: int = int(os.getenv("PROACTIVE_DISCUSSION_COOLDOWN", "14400"))
-# Maximum proactive discussions per calendar day (default: 4)
-MAX_PROACTIVE_DISCUSSIONS_PER_DAY: int = int(os.getenv("MAX_PROACTIVE_DISCUSSIONS_PER_DAY", "4"))
-# Minimum seconds before the same persona posts again (default: 12 hours)
-PERSONA_COOLDOWN: int = int(os.getenv("PERSONA_COOLDOWN", "43200"))
+# Maximum NEW proactive discussions per calendar day (3 = healthy volume without flooding)
+MAX_PROACTIVE_DISCUSSIONS_PER_DAY: int = int(os.getenv("MAX_PROACTIVE_DISCUSSIONS_PER_DAY", "3"))
+# Minimum seconds before the same persona posts again (1 hour — enables natural rotation
+# across the 34 community personas throughout the day)
+PERSONA_COOLDOWN: int = int(os.getenv("PERSONA_COOLDOWN", "3600"))
 
 # ── Thread growth / continuation ──────────────────────────────────────────────
 # Target number of meaningful posts per discussion thread
 THREAD_GROWTH_TARGET: int = int(os.getenv("THREAD_GROWTH_TARGET", "30"))
 # Minimum posts before a thread is considered worth continuing (has existing engagement)
 THREAD_MIN_POSTS_FOR_CONTINUATION: int = int(os.getenv("THREAD_MIN_POSTS_FOR_CONTINUATION", "2"))
-# Minimum seconds between AI continuation posts in the same thread
-THREAD_CONTINUATION_COOLDOWN: int = int(os.getenv("THREAD_CONTINUATION_COOLDOWN", "7200"))
+# Minimum seconds between AI continuation posts in the SAME thread (3 hours)
+# Prevents the scheduler from flooding a single thread back-to-back
+THREAD_CONTINUATION_COOLDOWN: int = int(os.getenv("THREAD_CONTINUATION_COOLDOWN", "10800"))
 
 # ── Article generation ────────────────────────────────────────────────────────
-# How often to generate an article (default: 24 hours)
-SCHEDULER_ARTICLE_INTERVAL: int = int(os.getenv("SCHEDULER_ARTICLE_INTERVAL", "86400"))
-# Maximum articles per calendar day
+# How often to generate an article (every 12 hours = 2 articles/day max)
+SCHEDULER_ARTICLE_INTERVAL: int = int(os.getenv("SCHEDULER_ARTICLE_INTERVAL", "43200"))
+# Maximum articles per calendar day (2 = substantial but not overwhelming)
 MAX_ARTICLES_PER_DAY: int = int(os.getenv("MAX_ARTICLES_PER_DAY", "2"))
 
 # ── PostgreSQL ────────────────────────────────────────────────────────────────

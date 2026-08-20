@@ -275,32 +275,20 @@ def _try_continue_existing_thread() -> Optional[str]:
             PERSONA_COOLDOWN,
         )
 
-        # Find the least-developed / least-recently-used eligible thread.
-        #
-        # Prefer:
-        #   1. fewer posts
-        #   2. thread not recently used by this scheduler
-        #
-        # We deliberately do NOT blindly take threads[0].
+        # Find an eligible thread using randomised selection so the scheduler
+        # does not always continue the same thread.
+        # Filter first for validity, then sample randomly from that set.
+        valid_threads = [
+            t for t in threads
+            if t.get("id") and t.get("title", "").strip()
+        ]
 
-        selected_thread = None
-
-        for thread in threads:
-            thread_id = thread.get("id")
-            thread_title = thread.get("title", "")
-            post_count = thread.get(
-                "post_count",
-                thread.get("posts_count", 0),
-            )
-
-            if not thread_id or not thread_title:
-                continue
-
-            selected_thread = thread
-            break
-
-        if selected_thread is None:
+        if not valid_threads:
             return None
+
+        # Random choice within eligible threads — avoids stickiness
+        import random as _random
+        selected_thread = _random.choice(valid_threads)
 
         thread_id = selected_thread.get("id")
         thread_title = selected_thread.get("title", "")
@@ -465,14 +453,17 @@ def _select_persona(repo, persona_cooldown: int):
             candidates.append((persona, secs))
 
     if candidates:
-        # Never-used personas first
+        # Never-used personas first — but randomise among them so we don't
+        # always pick the same alphabetically-first persona on a fresh deployment
         never_used = [c for c in candidates if c[1] is None]
         if never_used:
-            p = never_used[0][0]
+            import random as _random
+            p = _random.choice(never_used)[0]
             logger.debug(
                 "_select_persona: first-time persona key=%s display=%s",
                 p.key, p.display_name,
             )
+            return p.key, p.display_name
             return p.key, p.display_name
 
         # Choose the one inactive longest
