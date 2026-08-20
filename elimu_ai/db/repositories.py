@@ -407,18 +407,32 @@ class ProactiveDiscussionRepository:
         status: str,
         duration_ms: int = 0,
         error: Optional[str] = None,
-    ) -> None:
+        thread_id: Optional[int] = None,
+      ) -> None:
         from elimu_ai.db.connection import get_connection
-        result_json = json.dumps({"persona": persona, "topic": topic[:200], "status": status})
+
+        result_json = json.dumps({
+            "persona": persona,
+            "topic": topic[:200],
+            "status": status,
+            "thread_id": thread_id,
+        })
+
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO ai_scheduler_log"
                     "(job_name,status,result,duration_ms,error,ran_at)"
                     " VALUES(%s,%s,%s,%s,%s,%s)",
-                    (self.JOB_NAME, status,
-                     result_json, duration_ms, error, _now()),
-                )
+                    (
+                       self.JOB_NAME,
+                       status,
+                       result_json,
+                       duration_ms,
+                       error,
+                       _now(),
+                    ),
+               )
 
     @_db_op
     def get_recent(self, limit: int = 20) -> List[Dict[str, Any]]:
@@ -502,7 +516,9 @@ class ProactiveDiscussionRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT ran_at FROM ai_scheduler_log"
-                    " WHERE job_name=%s AND status='created_proactive_discussion'"
+                    " WHERE job_name=%s AND status IN ('created_proactive_discussion',"
+                    "'continued_existing_thread'"
+                    ") "
                     " AND result LIKE %s"
                     " ORDER BY ran_at DESC LIMIT 1",
                     (self.JOB_NAME, f'%"persona": "{persona}"%'),

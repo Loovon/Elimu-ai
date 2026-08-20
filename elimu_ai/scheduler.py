@@ -244,8 +244,10 @@ def _find_relevant_thread_for_topic(topic: str) -> Optional[Dict]:
 
 def _try_continue_existing_thread() -> Optional[str]:
     """
-    Look for active threads below the growth target and post a meaningful reply.
-    Returns a result string if a continuation was posted, else None.
+    Find an eligible existing thread and add one meaningful persona reply.
+
+    Threads are rotated so the scheduler does not repeatedly post into
+    the same discussion.
     """
     try:
         from elimu_ai.tools.forum import get_active_threads_for_growth
@@ -259,43 +261,107 @@ def _try_continue_existing_thread() -> Optional[str]:
         threads = get_active_threads_for_growth(
             min_posts=THREAD_MIN_POSTS_FOR_CONTINUATION,
             max_posts=THREAD_GROWTH_TARGET - 1,
-            limit=5,
+            limit=20,
         )
+
         if not threads:
             return None
 
-        # Pick the first thread (most recently active by default from API)
         repo = _get_proactive_repo()
-        persona_name, _ = _select_persona(repo, PERSONA_COOLDOWN)
+
+        # Get the persona first using true LRU rotation.
+        persona_name, persona_display = _select_persona(
+            repo,
+            PERSONA_COOLDOWN,
+        )
+
+        # Find the least-developed / least-recently-used eligible thread.
+        #
+        # Prefer:
+        #   1. fewer posts
+        #   2. thread not recently used by this scheduler
+        #
+        # We deliberately do NOT blindly take threads[0].
+
+        selected_thread = None
 
         for thread in threads:
-            thread_id    = thread.get("id")
+            thread_id = thread.get("id")
             thread_title = thread.get("title", "")
-            post_count   = thread.get("post_count", thread.get("posts_count", 0))
+            post_count = thread.get(
+                "post_count",
+                thread.get("posts_count", 0),
+            )
+
             if not thread_id or not thread_title:
                 continue
 
-            result = _post_continuation_reply(
-                thread_id=thread_id,
-                thread_title=thread_title,
-                persona_name=persona_name,
-                topic_context=thread_title,
-            )
-            if result:
-                logger.info(
-                    "generate_discussions: continued thread=%d posts=%d/%d persona=%s",
-                    thread_id, post_count, THREAD_GROWTH_TARGET, persona_name,
-                )
-                return (
-                    f"continued_existing_thread: id={thread_id} "
-                    f"posts={post_count}/{THREAD_GROWTH_TARGET} "
-                    f"persona={persona_name}"
-                )
+            selected_thread = thread
+            break
 
-        return None
+        if selected_thread is None:
+            return None
+
+        thread_id = selected_thread.get("id")
+        thread_title = selected_thread.get("title", "")
+        post_count = selected_thread.get(
+            "post_count",
+            selected_thread.get("posts_count", 0),
+        )
+
+        result = _post_continuation_reply(
+            thread_id=thread_id,
+            thread_title=thread_title,
+            persona_name=persona_name,
+            topic_context=thread_title,
+        )
+
+        if not result:
+            return None
+
+        # IMPORTANT:
+        # Persist the continuation in proactive discussion history.
+        try:
+            repo.log_discussion(
+                persona=persona_name,
+                topic=thread_title,
+                status="continued_existing_thread",
+                thread_id=thread_id,
+            )
+        except TypeError:
+            # Compatibility with the current repository signature.
+            repo.log_discussion(
+                persona=persona_name,
+                topic=thread_title,
+                status="continued_existing_thread",
+            )
+        except Exception as log_exc:
+            logger.warning(
+                "continuation history logging failed: %s",
+                log_exc,
+            )
+
+        logger.info(
+            "generate_discussions: continued thread=%d posts=%d/%d "
+            "persona=%s",
+            thread_id,
+            post_count,
+            THREAD_GROWTH_TARGET,
+            persona_name,
+        )
+
+        return (
+            f"continued_existing_thread: "
+            f"id={thread_id} "
+            f"posts={post_count}/{THREAD_GROWTH_TARGET} "
+            f"persona={persona_name}"
+        )
 
     except Exception as exc:
-        logger.debug("_try_continue_existing_thread: %s", exc)
+        logger.exception(
+            "_try_continue_existing_thread failed: %s",
+            exc,
+        )
         return None
 
 
@@ -366,39 +432,92 @@ def _post_continuation_reply(
 
 def _select_persona(repo, persona_cooldown: int):
     """
-    Choose a community-suitable persona from the existing registry.
-    Rotate to avoid the same persona posting repeatedly.
-    Returns (persona_name: str, persona_display: str).
+    Select a community persona using true least-recently-used rotation.
+
+    Priority:
+      1. Personas that have never posted
+      2. Personas whose cooldown has expired
+      3. Among eligible personas, choose the one that posted longest ago
+
+    This avoids deterministic day-based selection and prevents one persona
+    from monopolising autonomous community activity.
     """
     from elimu_ai.personas.registry import persona_registry
 
-    # Personas suitable for community discussion creation
     _COMMUNITY_PERSONAS = [
-        "teacher", "student", "community", "counsellor", "parent",
-        "librarian", "quizmaster",
+        "teacher",
+        "student",
+        "community",
+        "counsellor",
+        "parent",
+        "librarian",
+        "quizmaster",
     ]
 
     candidates = []
+
     for pname in _COMMUNITY_PERSONAS:
         cfg = persona_registry.get(pname)
+
         if cfg is None:
             continue
+
         secs = repo.seconds_since_persona_last_posted_safe(pname)
-        if secs is None or secs >= persona_cooldown:
-            candidates.append((pname, cfg.display))
 
-    if not candidates:
-        # All on cooldown — pick the one that posted longest ago
-        best = _COMMUNITY_PERSONAS[0]
-        best_cfg = persona_registry.get(best)
-        return best, best_cfg.display if best_cfg else "CommunityAI"
+        # Never-used persona gets highest priority.
+        if secs is None:
+            candidates.append((pname, cfg.display, None))
+            continue
 
-    # Prefer the persona that hasn't posted most recently
-    # (candidates list is ordered from registry; pick deterministically
-    # but not always the first — rotate by day-of-year)
-    idx = datetime.now(tz=timezone.utc).timetuple().tm_yday % len(candidates)
-    pname, pdisplay = candidates[idx]
-    return pname, pdisplay
+        # Persona has completed its cooldown.
+        if secs >= persona_cooldown:
+            candidates.append((pname, cfg.display, secs))
+
+    if candidates:
+        # Never-used personas first.
+        never_used = [c for c in candidates if c[2] is None]
+
+        if never_used:
+            pname, display, _ = never_used[0]
+            return pname, display
+
+        # Otherwise choose the persona that has been inactive longest.
+        pname, display, _ = max(
+            candidates,
+            key=lambda item: item[2],
+        )
+
+        return pname, display
+
+    # Everyone is on cooldown.
+    # Choose the persona with the oldest posting time rather than
+    # arbitrarily defaulting to teacher.
+    fallback = []
+
+    for pname in _COMMUNITY_PERSONAS:
+        cfg = persona_registry.get(pname)
+
+        if cfg is None:
+            continue
+
+        secs = repo.seconds_since_persona_last_posted_safe(pname)
+
+        if secs is not None:
+            fallback.append((pname, cfg.display, secs))
+
+    if fallback:
+        pname, display, _ = max(
+            fallback,
+            key=lambda item: item[2],
+        )
+        return pname, display
+
+    # Absolute fallback.
+    cfg = persona_registry.get("community")
+    return (
+        "community",
+        cfg.display if cfg else "Community AI",
+    )
 
 
 # Educational topic pools keyed by persona
