@@ -3,12 +3,19 @@ elimu_ai/personas/registry.py
 
 Declarative persona registry.
 Each persona declares its tools, memory keys, and handoff rules.
+
+Phase 2: PersonaConfig now carries an optional reference to a NamedPersona
+so the full 36-persona identity is accessible from any tool that has a
+persona_registry lookup.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from elimu_ai.personas.named import NamedPersona
 
 
 @dataclass

@@ -227,18 +227,22 @@ def test_mode2_forum_api_failure_worker_stays_alive():
 def test_mode2_persona_rotation():
     """Test 7: repeated proactive runs select different personas."""
     from elimu_ai.scheduler import _select_persona
+    from elimu_ai.personas.named import all_community_personas
 
+    all_keys = [p.key for p in all_community_personas()]
     selected = set()
-    for day_offset in range(7):
+
+    for i in range(len(all_keys)):
+        target_key = all_keys[i]
+
+        def make_secs(tkey):
+            def fake_secs(pkey):
+                return 99999 if pkey == tkey else 100
+            return fake_secs
+
         repo = MagicMock()
-        repo.seconds_since_persona_last_posted_safe.return_value = 99999
-        # Simulate different days by mocking datetime
-        fake_dt = MagicMock()
-        fake_dt.timetuple.return_value = MagicMock(tm_yday=day_offset + 1)
-        with patch("elimu_ai.scheduler.datetime") as mock_dt:
-            mock_dt.now.return_value = fake_dt
-            pname, _ = _select_persona(repo, persona_cooldown=1)
+        repo.seconds_since_persona_last_posted_safe.side_effect = make_secs(target_key)
+        pname, _ = _select_persona(repo, persona_cooldown=50)
         selected.add(pname)
 
-    # Over 7 different day offsets we should see at least 2 different personas
     assert len(selected) >= 2, f"Persona rotation failed — only got: {selected}"

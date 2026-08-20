@@ -98,8 +98,9 @@ def answer_unanswered_threads() -> int:
             ok = post_moderated_reply(
                 thread_id=thread_id,
                 content=content,
-                persona_name="librarian",
+                persona_name="librarian_01",
                 idempotency_key=f"ai-forum-answer-{thread_id}",
+                persona_key="librarian_01",
             )
             if ok:
                 count += 1

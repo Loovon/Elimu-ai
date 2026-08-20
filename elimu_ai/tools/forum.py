@@ -105,11 +105,15 @@ def save_forum_post(
     body: str,
     category_slug: str,
     idempotency_key: Optional[str] = None,
+    persona_key: Optional[str] = None,
 ) -> Optional[Dict]:
     """
     Create a forum discussion via HTTP API.
     Returns the created thread dict, or None if the API is unavailable.
     Idempotency-Key prevents duplicates on network retries.
+
+    persona_key (optional): stable named-persona identifier sent to Django
+    so the thread author is correctly attributed.
     """
     key = idempotency_key or f"ai-discussion-{uuid.uuid5(uuid.NAMESPACE_URL, title).hex}"
     try:
@@ -120,8 +124,12 @@ def save_forum_post(
             body=body,
             category=category_slug,
             idempotency_key=key,
+            persona_key=persona_key,
         )
-        logger.info("forum: created discussion %r via API", title[:60])
+        logger.info(
+            "forum: created discussion %r persona=%s via API",
+            title[:60], persona_key or "none",
+        )
         return result
     except Exception as exc:
         logger.warning("forum.save_forum_post: Django API unavailable — %s", exc)
@@ -186,18 +194,30 @@ def post_ai_answer(
     thread_id: int,
     content: str,
     idempotency_key: Optional[str] = None,
+    persona_key: Optional[str] = None,
 ) -> bool:
     """
     Post an AI-generated answer to a thread via HTTP API.
     Returns True on success, False if API unavailable.
     The idempotency key prevents duplicate posts on retry.
+
+    persona_key (optional): stable named-persona identifier sent to Django
+    so the reply author is correctly attributed.
     """
     key = idempotency_key or f"ai-forum-answer-{thread_id}"
     try:
         from elimu_ai.http_client import get_client
         client = get_client()
-        client.post_answer(thread_id=thread_id, content=content, idempotency_key=key)
-        logger.info("forum.post_ai_answer: answered thread %d", thread_id)
+        client.post_answer(
+            thread_id=thread_id,
+            content=content,
+            idempotency_key=key,
+            persona_key=persona_key,
+        )
+        logger.info(
+            "forum.post_ai_answer: answered thread %d persona=%s",
+            thread_id, persona_key or "none",
+        )
         return True
     except Exception as exc:
         logger.warning("forum.post_ai_answer: failed for thread %d — %s", thread_id, exc)
@@ -326,15 +346,19 @@ def post_moderated_reply(
     content: str,
     persona_name: str = "community",
     idempotency_key: Optional[str] = None,
+    persona_key: Optional[str] = None,
 ) -> bool:
     """
     Post a reply to an existing thread AFTER passing local moderation.
     Returns True on success, False if moderation fails or API is unavailable.
 
+    persona_key (optional): if provided, passed to Django to attribute the
+    reply to the correct named AI persona rather than a generic AI user.
+
     This is the safe posting path for all AI-generated content:
       1. Local moderation check
       2. Django API moderation check (best-effort)
-      3. Post via HTTP
+      3. Post via HTTP with persona identity
     """
     from elimu_ai.tools.moderation import moderate
 
@@ -366,5 +390,10 @@ def post_moderated_reply(
         )
         # Continue — local moderation already passed
 
-    # Layer 3: post reply
-    return post_ai_answer(thread_id, content, idempotency_key=idempotency_key)
+    # Layer 3: post reply with persona identity
+    return post_ai_answer(
+        thread_id,
+        content,
+        idempotency_key=idempotency_key,
+        persona_key=persona_key,
+    )

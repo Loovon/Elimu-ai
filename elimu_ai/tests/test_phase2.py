@@ -283,16 +283,24 @@ class TestPersonaSelection(unittest.TestCase):
 
     def test_persona_rotation_across_days(self):
         from elimu_ai.scheduler import _select_persona
+        from elimu_ai.personas.named import all_community_personas
+
+        all_keys = [p.key for p in all_community_personas()]
         selected = set()
-        for day in range(7):
+
+        for i in range(len(all_keys)):
+            target_key = all_keys[i]
+
+            def make_secs(tkey):
+                def fake_secs(pkey):
+                    return 99999 if pkey == tkey else 100
+                return fake_secs
+
             repo = MagicMock()
-            repo.seconds_since_persona_last_posted_safe.return_value = 99999
-            fake_dt = MagicMock()
-            fake_dt.timetuple.return_value = MagicMock(tm_yday=day + 1)
-            with patch("elimu_ai.scheduler.datetime") as mock_dt:
-                mock_dt.now.return_value = fake_dt
-                name, _ = _select_persona(repo, persona_cooldown=1)
+            repo.seconds_since_persona_last_posted_safe.side_effect = make_secs(target_key)
+            name, _ = _select_persona(repo, persona_cooldown=50)
             selected.add(name)
+
         self.assertGreaterEqual(len(selected), 2)
 
 

@@ -373,29 +373,28 @@ def _post_continuation_reply(
 ) -> bool:
     """
     Generate and post a meaningful continuation reply to an existing thread.
-    Uses moderation gate. Returns True if posted successfully.
+
+    persona_name is the stable NamedPersona key (e.g. "teacher_01").
+    Uses the NamedPersona voice instruction for content generation.
+    Passes persona_key to post_moderated_reply → post_ai_answer → Django API
+    so the reply author is correctly attributed to the named persona.
     """
     from elimu_ai.tools.forum import post_moderated_reply
     from elimu_ai.gemini import generate as gemini_generate
+    from elimu_ai.personas.named import get_persona
 
-    _CONTINUATION_VOICE = {
-        "teacher":    "As an experienced Kenyan teacher, add a useful educational contribution to this discussion.",
-        "student":    "As a Kenyan student, share a genuine perspective or question about this topic.",
-        "community":  "As a community member, add a relevant point to keep this discussion going.",
-        "counsellor": "As a career counsellor, provide practical guidance related to this topic.",
-        "parent":     "As a Kenyan parent, share your perspective on this educational topic.",
-        "librarian":  "As a librarian, suggest resources or additional information for this discussion.",
-        "quizmaster": "As an exam preparation specialist, add a useful tip or question to this discussion.",
-    }
+    # Resolve persona — get voice instruction
+    persona = get_persona(persona_name)
+    if persona is None:
+        logger.error(
+            "_post_continuation_reply: unknown persona key=%r — skipping",
+            persona_name,
+        )
+        return False
 
-    voice = _CONTINUATION_VOICE.get(
-        persona_name,
-        "Add a useful educational point to this discussion.",
-    )
     context = topic_context or thread_title
-
     prompt = (
-        f"{voice}\n\n"
+        f"{persona.voice}\n\n"
         f"Discussion title: {thread_title}\n"
         f"Context: {context[:200]}\n\n"
         "Rules:\n"
@@ -423,7 +422,14 @@ def _post_continuation_reply(
             content=reply,
             persona_name=persona_name,
             idempotency_key=ikey,
+            persona_key=persona_name,   # ← stable key passed to Django
         )
+        if ok:
+            logger.info(
+                "_post_continuation_reply: posted thread=%d "
+                "persona_key=%s display=%s role=%s",
+                thread_id, persona_name, persona.display_name, persona.role,
+            )
         return ok
     except Exception as exc:
         logger.debug("_post_continuation_reply: thread=%d error=%s", thread_id, exc)
@@ -432,92 +438,71 @@ def _post_continuation_reply(
 
 def _select_persona(repo, persona_cooldown: int):
     """
-    Select a community persona using true least-recently-used rotation.
+    Select a named community persona using true least-recently-used rotation.
+
+    Returns (persona_key: str, display_name: str) from the 36 NamedPersona registry.
+    The persona_key is the stable internal key (e.g. "student_01").
+    The cooldown tracking uses the stable persona_key — not the role category.
 
     Priority:
       1. Personas that have never posted
-      2. Personas whose cooldown has expired
-      3. Among eligible personas, choose the one that posted longest ago
+      2. Personas whose cooldown has expired (oldest first)
+      3. Fallback: the one with the longest elapsed time
 
-    This avoids deterministic day-based selection and prevents one persona
-    from monopolising autonomous community activity.
+    This prevents any single persona from dominating and ensures all 36 rotate fairly.
     """
-    from elimu_ai.personas.registry import persona_registry
+    from elimu_ai.personas.named import all_community_personas
 
-    _COMMUNITY_PERSONAS = [
-        "teacher",
-        "student",
-        "community",
-        "counsellor",
-        "parent",
-        "librarian",
-        "quizmaster",
-    ]
+    eligible_personas = all_community_personas()
 
     candidates = []
-
-    for pname in _COMMUNITY_PERSONAS:
-        cfg = persona_registry.get(pname)
-
-        if cfg is None:
-            continue
-
-        secs = repo.seconds_since_persona_last_posted_safe(pname)
-
-        # Never-used persona gets highest priority.
+    for persona in eligible_personas:
+        secs = repo.seconds_since_persona_last_posted_safe(persona.key)
         if secs is None:
-            candidates.append((pname, cfg.display, None))
-            continue
-
-        # Persona has completed its cooldown.
-        if secs >= persona_cooldown:
-            candidates.append((pname, cfg.display, secs))
+            # Never posted — highest priority
+            candidates.append((persona, None))
+        elif secs >= persona_cooldown:
+            candidates.append((persona, secs))
 
     if candidates:
-        # Never-used personas first.
-        never_used = [c for c in candidates if c[2] is None]
-
+        # Never-used personas first
+        never_used = [c for c in candidates if c[1] is None]
         if never_used:
-            pname, display, _ = never_used[0]
-            return pname, display
+            p = never_used[0][0]
+            logger.debug(
+                "_select_persona: first-time persona key=%s display=%s",
+                p.key, p.display_name,
+            )
+            return p.key, p.display_name
 
-        # Otherwise choose the persona that has been inactive longest.
-        pname, display, _ = max(
-            candidates,
-            key=lambda item: item[2],
+        # Choose the one inactive longest
+        p, _ = max(candidates, key=lambda item: item[1])
+        logger.debug(
+            "_select_persona: LRU selection key=%s display=%s",
+            p.key, p.display_name,
         )
+        return p.key, p.display_name
 
-        return pname, display
-
-    # Everyone is on cooldown.
-    # Choose the persona with the oldest posting time rather than
-    # arbitrarily defaulting to teacher.
+    # Everyone on cooldown — pick the one that posted longest ago
     fallback = []
-
-    for pname in _COMMUNITY_PERSONAS:
-        cfg = persona_registry.get(pname)
-
-        if cfg is None:
-            continue
-
-        secs = repo.seconds_since_persona_last_posted_safe(pname)
-
+    for persona in eligible_personas:
+        secs = repo.seconds_since_persona_last_posted_safe(persona.key)
         if secs is not None:
-            fallback.append((pname, cfg.display, secs))
+            fallback.append((persona, secs))
 
     if fallback:
-        pname, display, _ = max(
-            fallback,
-            key=lambda item: item[2],
+        p, _ = max(fallback, key=lambda item: item[1])
+        logger.debug(
+            "_select_persona: all on cooldown, fallback key=%s display=%s",
+            p.key, p.display_name,
         )
-        return pname, display
+        return p.key, p.display_name
 
-    # Absolute fallback.
-    cfg = persona_registry.get("community")
-    return (
-        "community",
-        cfg.display if cfg else "Community AI",
-    )
+    # Absolute fallback — first community persona
+    p = eligible_personas[0] if eligible_personas else None
+    if p:
+        return p.key, p.display_name
+    return "community_01", "ElimuTalks Community"
 
 
 # Educational topic pools keyed by persona
@@ -612,10 +597,16 @@ def _is_duplicate(topic: str, recent_topics: List[str], threshold: int = 5) -> b
 def _select_topic(persona_name: str, recent_topics: List[str]) -> Optional[str]:
     """
     Pick a non-duplicate educational topic for the persona.
-    Rotates through the pool, skipping topics that are too similar to recent ones.
+    persona_name is a NamedPersona key (e.g. "student_01").
+    The topic pool is selected by role_category so all personas in the
+    same category have varied topic options.
     Returns None if every candidate is a duplicate.
     """
-    pool = _PERSONA_TOPIC_POOLS.get(persona_name, _DEFAULT_TOPICS)
+    from elimu_ai.personas.named import get_persona
+    persona = get_persona(persona_name)
+    category = persona.role_category if persona else "community"
+    pool = _PERSONA_TOPIC_POOLS.get(category, _DEFAULT_TOPICS)
+
     # Rotate starting offset by hour-of-day so consecutive runs don't pick same topic
     hour = datetime.now(tz=timezone.utc).hour
     start = hour % len(pool)
@@ -627,31 +618,32 @@ def _select_topic(persona_name: str, recent_topics: List[str]) -> Optional[str]:
 
 
 def _create_discussion_as_persona(
-    persona_name: str,
+    persona_key: str,
     persona_display: str,
     topic: str,
 ) -> str:
     """
-    Generate and post a discussion in the persona's voice.
-    Uses the existing create_discussion() → generate_forum_post() → HTTP path.
-    The persona voice is injected through a persona-aware prompt prefix.
+    Generate and post a discussion in the named persona's voice.
+
+    persona_key is the stable NamedPersona key (e.g. "student_01").
+    persona_display is only used for fallback logging; the Django backend
+    uses persona_key to resolve the correct author account.
     """
-    from elimu_ai.tools.forum import generate_forum_post, save_forum_post, _pick_category
+    from elimu_ai.tools.forum import save_forum_post, _pick_category
     from elimu_ai.gemini import generate as gemini_generate
+    from elimu_ai.personas.named import get_persona
 
-    _PERSONA_VOICE_PREFIX: Dict[str, str] = {
-        "teacher":    "As an experienced Kenyan teacher, write a genuine forum post.",
-        "student":    "As a Kenyan secondary school student preparing for exams, write a genuine forum post.",
-        "community":  "As a community member passionate about Kenyan education, write a forum post.",
-        "counsellor": "As a career counsellor advising Kenyan students, write a forum post.",
-        "parent":     "As a parent navigating CBC education in Kenya, write a forum post.",
-        "librarian":  "As an educational librarian familiar with Elimu Library, write a forum post.",
-        "quizmaster": "As a quiz and exam preparation specialist, write a forum post.",
-    }
+    # Resolve named persona — get voice instruction
+    persona = get_persona(persona_key)
+    if persona is None:
+        logger.error(
+            "_create_discussion_as_persona: unknown persona_key=%r — aborting",
+            persona_key,
+        )
+        raise ValueError(f"Unknown persona_key: {persona_key!r}")
 
-    voice = _PERSONA_VOICE_PREFIX.get(persona_name, "Write a genuine educational forum post.")
     prompt = (
-        f"{voice}\n\n"
+        f"{persona.voice}\n\n"
         f"Topic: {topic}\n\n"
         "Rules:\n"
         "- Plain text only, no Markdown.\n"
@@ -662,7 +654,7 @@ def _create_discussion_as_persona(
         "- No markdown. No extra text outside the JSON object."
     )
 
-    import json, re
+    import json, re, uuid
     raw = gemini_generate(prompt)
     match = re.search(r"\{[\s\S]*?\}", raw)
     if match:
@@ -677,14 +669,27 @@ def _create_discussion_as_persona(
         title = f"Discussion: {topic[:60]}"
         body  = raw.strip() or topic
 
-    cat = _pick_category(topic)
-    import uuid
-    ikey = f"proactive-{persona_name}-{uuid.uuid5(uuid.NAMESPACE_URL, title).hex}"
-    thread = save_forum_post(title, body, cat, idempotency_key=ikey)
+    cat  = _pick_category(topic)
+    ikey = f"proactive-{persona_key}-{uuid.uuid5(uuid.NAMESPACE_URL, title).hex}"
+
+    thread = save_forum_post(
+        title,
+        body,
+        cat,
+        idempotency_key=ikey,
+        persona_key=persona_key,   # ← passes named identity to Django
+    )
+
     if thread:
         slug = thread.get("slug", re.sub(r"[^\w-]", "-", title.lower())[:60])
+        logger.info(
+            "_create_discussion_as_persona: created thread=%s "
+            "persona_key=%s display=%s role=%s",
+            slug, persona_key, persona.display_name, persona.role,
+        )
         return f"created: /thread/{slug}/"
-    # API unavailable — graceful degradation (still logged as success attempt)
+
+    # API unavailable — graceful degradation
     return f"generated (API unavailable): {title}"
 
 

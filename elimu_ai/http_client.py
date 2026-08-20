@@ -237,32 +237,48 @@ class ElimuAPIClient:
         body: str,
         category: str,
         idempotency_key: Optional[str] = None,
+        persona_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """POST /api/ai/forum/discussions/"""
+        """
+        POST /api/ai/forum/discussions/
+
+        persona_key is passed to Django so the thread can be attributed
+        to the correct named AI persona account rather than a generic AI user.
+        If None, Django falls back to the default AI author.
+        """
         key = idempotency_key or f"ai-discussion-{uuid.uuid5(uuid.NAMESPACE_URL, title).hex}"
-        return self.post("/api/ai/forum/discussions/", {
+        payload: Dict[str, Any] = {
             "title": title,
             "body":  body,
             "category": category,
             "ai_generated": True,
-        }, idempotency_key=key)
+        }
+        if persona_key:
+            payload["persona_key"] = persona_key
+        return self.post("/api/ai/forum/discussions/", payload, idempotency_key=key)
 
     def post_answer(
         self,
         thread_id: int,
         content: str,
         idempotency_key: Optional[str] = None,
+        persona_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         POST /api/ai/forum/answers/
         Idempotency-Key prevents duplicate answers on network retries.
+
+        persona_key identifies the named AI persona posting this reply.
         """
         key = idempotency_key or f"ai-forum-answer-{thread_id}"
-        return self.post("/api/ai/forum/answers/", {
+        payload: Dict[str, Any] = {
             "thread_id":    thread_id,
             "content":      content,
             "ai_generated": True,
-        }, idempotency_key=key)
+        }
+        if persona_key:
+            payload["persona_key"] = persona_key
+        return self.post("/api/ai/forum/answers/", payload, idempotency_key=key)
 
     def check_moderation(self, content: str) -> Dict[str, Any]:
         """POST /api/ai/moderation/check/"""
