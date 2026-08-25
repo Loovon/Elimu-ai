@@ -55,6 +55,17 @@ class TestExistingContinuationPreserved(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 class TestUnansweredThreadParticipation(unittest.TestCase):
 
+    def test_participate_skips_unknown_post_count(self):
+        from elimu_ai.scheduler import _participate_unanswered_thread
+
+        threads = [{"id": 10, "title": "Missing count", "opening_post": "Question"}]
+        with patch("elimu_ai.tools.forum.get_unanswered_threads", return_value=threads), \
+             patch("elimu_ai.scheduler._post_continuation_reply") as mock_reply:
+            result = _participate_unanswered_thread()
+
+        self.assertIsNone(result)
+        mock_reply.assert_not_called()
+
     def test_step2_participates_in_unanswered_thread(self):
         from elimu_ai.scheduler import task_continue_discussions
 

@@ -319,6 +319,19 @@ class TestPersonaKeyInAPIPayloads(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertNotIn("persona_key", payload)
 
+    def test_unknown_persona_key_is_rejected_before_request(self):
+        from elimu_ai.http_client import ElimuAPIClient
+        client = ElimuAPIClient(base_url="http://example.com")
+
+        with patch.object(client, "_request") as mock_req:
+            with self.assertRaises(ValueError):
+                client.post_answer(
+                    thread_id=9,
+                    content="Answer text",
+                    persona_key="does_not_exist",
+                )
+        mock_req.assert_not_called()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 17. Unknown persona_key raises ValueError

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -54,6 +55,18 @@ _NO_RETRY_STATUSES  = {400, 401, 403, 404, 405, 409, 410, 422}
 def _backoff_with_jitter(attempt: int, base: float) -> float:
     """Exponential backoff with uniform jitter."""
     return (base ** attempt) + random.uniform(0, _JITTER_MAX)
+
+
+def _safe_response_detail(response: Any, limit: int = 500) -> str:
+    """Return a short response body with credential-like values redacted."""
+    text = str(getattr(response, "text", "") or "")
+    text = re.sub(
+        r'("(?:authorization|password|secret|token|api[_-]?key)"\s*:\s*")[^"]*(")',
+        r'\1[REDACTED]\2',
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text[:limit].replace("\n", " ").strip()
 
 
 class ElimuAPIClient:
@@ -127,13 +140,21 @@ class ElimuAPIClient:
                 )
 
                 if resp.status_code == 401:
-                    raise AuthenticationError("API returned 401 — check AI_SHARED_SECRET.")
+                    detail = _safe_response_detail(resp)
+                    suffix = f" error={detail!r}" if detail else ""
+                    raise AuthenticationError(
+                        f"API returned 401 — check AI_SHARED_SECRET.{suffix}"
+                    )
                 if resp.status_code == 403:
-                    raise AuthenticationError("API returned 403 Forbidden.")
+                    detail = _safe_response_detail(resp)
+                    suffix = f" error={detail!r}" if detail else ""
+                    raise AuthenticationError(f"API returned 403 Forbidden.{suffix}")
 
                 if not resp.ok:
+                    detail = _safe_response_detail(resp)
+                    suffix = f" error={detail!r}" if detail else ""
                     exc = HTTPResponseError(
-                        f"API {method.upper()} {path} → {resp.status_code}",
+                        f"API {method.upper()} {path} → {resp.status_code}{suffix}",
                         status_code=resp.status_code,
                     )
                     if resp.status_code in _NO_RETRY_STATUSES:
@@ -255,17 +276,7 @@ class ElimuAPIClient:
             "ai_generated": True,
         }
         if persona_key:
-            payload["persona_key"] = persona_key
-            # Resolve the stable username and display name for Django user lookup
-            try:
-                from elimu_ai.personas.named import get_persona
-                p = get_persona(persona_key)
-                if p:
-                    payload["ai_username"]     = p.username
-                    payload["ai_display_name"] = p.display_name
-                    payload["ai_role"]         = p.role
-            except Exception:
-                pass
+            payload.update(self._persona_fields(persona_key))
         return self.post("/api/ai/forum/discussions/", payload, idempotency_key=key)
 
     def post_answer(
@@ -289,17 +300,22 @@ class ElimuAPIClient:
             "ai_generated": True,
         }
         if persona_key:
-            payload["persona_key"] = persona_key
-            try:
-                from elimu_ai.personas.named import get_persona
-                p = get_persona(persona_key)
-                if p:
-                    payload["ai_username"]     = p.username
-                    payload["ai_display_name"] = p.display_name
-                    payload["ai_role"]         = p.role
-            except Exception:
-                pass
+            payload.update(self._persona_fields(persona_key))
         return self.post("/api/ai/forum/answers/", payload, idempotency_key=key)
+
+    @staticmethod
+    def _persona_fields(persona_key: str) -> Dict[str, Any]:
+        from elimu_ai.personas.named import get_persona
+
+        persona = get_persona(persona_key)
+        if persona is None:
+            raise ValueError(f"Unknown persona_key: {persona_key!r}")
+        return {
+            "persona_key": persona_key,
+            "ai_username": persona.username,
+            "ai_display_name": persona.display_name,
+            "ai_role": persona.role,
+        }
 
     def check_moderation(self, content: str) -> Dict[str, Any]:
         """POST /api/ai/moderation/check/"""

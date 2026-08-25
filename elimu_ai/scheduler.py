@@ -101,8 +101,8 @@ def task_generate_discussions() -> str:
     try:
         # ── STEP 1: unanswered threads exist → answer them ─────────────────
         threads = get_unanswered_threads(cutoff_hours=3)
-        answerable = [t for t in threads
-                      if t.get("post_count", t.get("posts_count", 0)) == 1]
+        from elimu_ai.community_tasks import _get_post_count
+        answerable = [t for t in threads if _get_post_count(t) == 1]
 
         if answerable:
             from elimu_ai.tools.answer import answer_unanswered_threads
@@ -173,10 +173,9 @@ def task_generate_discussions() -> str:
         if existing_thread:
             thread_id    = existing_thread.get("id")
             thread_title = existing_thread.get("title", "")
-            thread_posts = existing_thread.get("post_count",
-                           existing_thread.get("posts_count", 0))
+            thread_posts = _get_post_count(existing_thread)
 
-            if thread_id and thread_posts < THREAD_GROWTH_TARGET:
+            if thread_id and thread_posts is not None and thread_posts < THREAD_GROWTH_TARGET:
                 cont_result = _post_continuation_reply(
                     thread_id=thread_id,
                     thread_title=thread_title,
@@ -273,6 +272,7 @@ def _try_continue_existing_thread() -> Optional[str]:
             THREAD_CONTINUATION_COOLDOWN,
             PERSONA_COOLDOWN,
         )
+        from elimu_ai.community_tasks import _get_post_count
 
         threads = get_active_threads_for_growth(
             min_posts=THREAD_MIN_POSTS_FOR_CONTINUATION,
@@ -309,10 +309,7 @@ def _try_continue_existing_thread() -> Optional[str]:
 
         thread_id = selected_thread.get("id")
         thread_title = selected_thread.get("title", "")
-        post_count = selected_thread.get(
-            "post_count",
-            selected_thread.get("posts_count", 0),
-        )
+        post_count = _get_post_count(selected_thread)
 
         result = _post_continuation_reply(
             thread_id=thread_id,
@@ -706,6 +703,7 @@ def task_recommend_resources() -> str:
     try:
         from elimu_ai.tools.forum import get_unanswered_threads, post_ai_answer
         from elimu_ai.tools.library import find_materials
+        from elimu_ai.community_tasks import _get_post_count
 
         _KEYWORDS = ["notes", "revision", "past paper", "scheme", "resources",
                      "lesson plan", "assessment", "homework"]
@@ -717,7 +715,7 @@ def task_recommend_resources() -> str:
         for thread in threads:
             thread_id  = thread.get("id")
             title      = thread.get("title", "")
-            post_count = thread.get("post_count", thread.get("posts_count", 0))
+            post_count = _get_post_count(thread)
             if not thread_id or not title or post_count != 1:
                 continue
             if any(kw in title.lower() for kw in _KEYWORDS):
@@ -968,6 +966,7 @@ def _participate_unanswered_thread(
     try:
         from elimu_ai.tools.forum import get_unanswered_threads
         from elimu_ai.config import PERSONA_COOLDOWN
+        from elimu_ai.community_tasks import _get_post_count
 
         # Fetch recent unanswered threads (24h window to catch older ones too)
         threads = get_unanswered_threads(cutoff_hours=24)
@@ -982,8 +981,8 @@ def _participate_unanswered_thread(
                 continue
             if skip_thread_id is not None and tid == skip_thread_id:
                 continue
-            pc = t.get("post_count", t.get("posts_count", 0))
-            if 1 <= pc <= 3:
+            pc = _get_post_count(t)
+            if pc is not None and 1 <= pc <= 3:
                 candidates.append(t)
 
         if not candidates:
@@ -993,7 +992,7 @@ def _participate_unanswered_thread(
         thread = _random.choice(candidates)
         thread_id    = thread.get("id")
         thread_title = thread.get("title", "")
-        post_count   = thread.get("post_count", thread.get("posts_count", 0))
+        post_count   = _get_post_count(thread)
 
         if not thread_id or not thread_title:
             return None

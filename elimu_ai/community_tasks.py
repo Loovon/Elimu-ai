@@ -27,7 +27,7 @@ MAIN_ROLES = ("parent", "teacher", "student")
 # Thread prioritization
 # ---------------------------------------------------------------------------
 
-def _get_post_count(thread: Dict) -> int:
+def _get_post_count(thread: Dict) -> Optional[int]:
     """Robustly extract post count from a thread dict."""
     for field in ("post_count", "posts_count", "num_posts", "reply_count"):
         val = thread.get(field)
@@ -39,7 +39,7 @@ def _get_post_count(thread: Dict) -> int:
     posts = thread.get("posts")
     if isinstance(posts, list):
         return len(posts)
-    return 0
+    return None
 
 
 def _get_last_activity(thread: Dict) -> str:
@@ -72,7 +72,10 @@ def select_thread_by_priority(threads: List[Dict]) -> Optional[Dict]:
     if not threads:
         return None
 
-    valid = [t for t in threads if t.get("id") and t.get("title", "").strip()]
+    valid = [
+        t for t in threads
+        if t.get("id") and t.get("title", "").strip() and _get_post_count(t) is not None
+    ]
     if not valid:
         return None
 
@@ -87,7 +90,7 @@ def select_thread_by_priority(threads: List[Dict]) -> Optional[Dict]:
 
     selected = valid[0]
     logger.info(
-        "community: thread priority selected id=%s title=%r post_count=%d",
+        "community: thread priority selected id=%s title=%r post_count=%s",
         selected.get("id"), selected.get("title", "")[:60], _get_post_count(selected),
     )
     return selected
@@ -257,10 +260,7 @@ def task_main_persona_community() -> str:
 
     # First check for unanswered threads (post_count == 1)
     unanswered = get_unanswered_threads(cutoff_hours=6)
-    unanswered_eligible = [
-        t for t in unanswered
-        if _get_post_count(t) == 1
-    ]
+    unanswered_eligible = [t for t in unanswered if _get_post_count(t) == 1]
 
     if unanswered_eligible:
         thread = select_thread_by_priority(unanswered_eligible)
@@ -287,7 +287,7 @@ def task_main_persona_community() -> str:
     post_count   = _get_post_count(thread)
 
     logger.info(
-        "community: action=%s thread=%d %r post_count=%d role=%s persona=%s",
+        "community: action=%s thread=%d %r post_count=%s role=%s persona=%s",
         action, thread_id, thread_title[:60], post_count, role, persona_key,
     )
 

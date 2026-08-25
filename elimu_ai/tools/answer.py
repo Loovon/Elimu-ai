@@ -30,7 +30,7 @@ def unanswered_threads() -> List[Dict]:
     return threads
 
 
-def _get_post_count(thread: Dict) -> int:
+def _get_post_count(thread: Dict) -> Optional[int]:
     """
     Robustly extract post count from a thread dict.
     Handles: post_count, posts_count, num_posts, posts (list).
@@ -46,7 +46,7 @@ def _get_post_count(thread: Dict) -> int:
     posts = thread.get("posts")
     if isinstance(posts, list):
         return len(posts)
-    return 0
+    return None
 
 
 def _build_context_aware_answer(thread: Dict) -> Optional[str]:
@@ -102,7 +102,7 @@ def answer_unanswered_threads() -> int:
         # Only answer threads with exactly 1 post (the opening post)
         if post_count != 1:
             logger.debug(
-                "answer: skipping thread=%d %r (post_count=%d, need exactly 1)",
+                "answer: skipping thread=%d %r (post_count=%s, need exactly 1)",
                 thread_id, title[:60], post_count,
             )
             continue
