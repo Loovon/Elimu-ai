@@ -305,6 +305,10 @@ class ElimuAPIClient:
         """POST /api/ai/moderation/check/"""
         return self.post("/api/ai/moderation/check/", {"content": content})
 
+    def chat(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/ai/chat/ — generic chat endpoint wrapper for integrations/tests."""
+        return self.post("/api/ai/chat/", payload)
+
     # ── Catalog API ───────────────────────────────────────────────────────────
 
     def get_catalog_status(self) -> Dict[str, Any]:

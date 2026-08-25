@@ -63,7 +63,7 @@ for test_file in test_files:
              f"{GREEN}{suite_pass} passed{RESET}, {RED}{suite_fail} failed{RESET}"
     print(f"  → {status}")
 
-print(f"\n{'='*60}")
+print(f"{'='*60}")
 total = total_passed + total_failed
 if total_failed == 0 and not suite_errors:
     print(f"{GREEN}  ALL {total} TESTS PASSED{RESET}")
@@ -75,4 +75,5 @@ else:
             print(f"    {name}: {err}")
 print(f"{'='*60}")
 
-sys.exit(1 if (total_failed or suite_errors) else 0)
+if __name__ == '__main__':
+    sys.exit(1 if (total_failed or suite_errors) else 0)

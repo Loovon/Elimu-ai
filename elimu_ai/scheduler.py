@@ -31,6 +31,7 @@ from elimu_ai.config import (
     THREAD_CONTINUATION_COOLDOWN,
     SCHEDULER_ARTICLE_INTERVAL,
     MAX_ARTICLES_PER_DAY,
+    SCHEDULER_MAIN_PERSONA_INTERVAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,21 @@ def task_answer_unanswered() -> str:
         logger.error("task_answer_unanswered: %s", exc)
         return f"Error: {exc}"
 
+
+
+
+def task_main_persona_community() -> str:
+    """
+    Dedicated parent/teacher/student role rotation community task.
+    Selects the least-recently-active role, then a named persona within it,
+    then the lowest-reply eligible thread, and posts a reply.
+    """
+    try:
+        from elimu_ai.community_tasks import task_main_persona_community as _task
+        return _task()
+    except Exception as exc:
+        logger.error("task_main_persona_community: %s", exc)
+        return f"Error: {exc}"
 
 def task_generate_discussions() -> str:
     """
@@ -275,9 +291,9 @@ def _try_continue_existing_thread() -> Optional[str]:
             PERSONA_COOLDOWN,
         )
 
-        # Find an eligible thread using randomised selection so the scheduler
-        # does not always continue the same thread.
-        # Filter first for validity, then sample randomly from that set.
+        # Deterministic priority ordering — fewest posts first
+        # This prevents repeatedly continuing the same high-post thread
+        # while lower-reply threads are ignored.
         valid_threads = [
             t for t in threads
             if t.get("id") and t.get("title", "").strip()
@@ -286,9 +302,10 @@ def _try_continue_existing_thread() -> Optional[str]:
         if not valid_threads:
             return None
 
-        # Random choice within eligible threads — avoids stickiness
-        import random as _random
-        selected_thread = _random.choice(valid_threads)
+        from elimu_ai.community_tasks import select_thread_by_priority
+        selected_thread = select_thread_by_priority(valid_threads)
+        if selected_thread is None:
+            return None
 
         thread_id = selected_thread.get("id")
         thread_title = selected_thread.get("title", "")
@@ -1223,6 +1240,7 @@ def _cache_resolved_answer(question: str, answer: str) -> None:
 _TASK_REGISTRY: List[Tuple[str, Callable[[], str], int]] = [
     ("answer_unanswered",    task_answer_unanswered,    SCHEDULER_ANSWER_INTERVAL),
     ("generate_discussions", task_generate_discussions,  SCHEDULER_DISCUSS_INTERVAL),
+    ("main_persona_community", task_main_persona_community, SCHEDULER_MAIN_PERSONA_INTERVAL),
     ("continue_discussions", task_continue_discussions,  THREAD_CONTINUATION_COOLDOWN),
     ("generate_article",     task_generate_article,      SCHEDULER_ARTICLE_INTERVAL),
     ("recommend_resources",  task_recommend_resources,   SCHEDULER_RECOMMEND_INTERVAL),

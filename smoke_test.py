@@ -119,12 +119,13 @@ root_level = logging.getLogger().level
 check("root logger level set",        root_level > 0)
 
 # ── Summary ───────────────────────────────────────────────────────────────────
-print()
-print("=" * 50)
-total = passed + failed
-if failed == 0:
-    print(f"\033[92m  ALL {total} SMOKE TESTS PASSED\033[0m")
-else:
-    print(f"\033[91m  {failed}/{total} SMOKE TESTS FAILED\033[0m")
-print("=" * 50)
-sys.exit(1 if failed else 0)
+if __name__ == "__main__":
+    print()
+    print("=" * 50)
+    total = passed + failed
+    if failed == 0:
+        print(f"\033[92m  ALL {total} SMOKE TESTS PASSED\033[0m")
+    else:
+        print(f"\033[91m  {failed}/{total} SMOKE TESTS FAILED\033[0m")
+    print("=" * 50)
+    sys.exit(1 if failed else 0)

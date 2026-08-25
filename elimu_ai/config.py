@@ -73,6 +73,9 @@ THREAD_CONTINUATION_COOLDOWN: int = int(os.getenv("THREAD_CONTINUATION_COOLDOWN"
 
 # ── Article generation ────────────────────────────────────────────────────────
 # How often to generate an article (every 12 hours = 2 articles/day max)
+# How often the main parent/teacher/student persona rotation runs (every 45 min)
+SCHEDULER_MAIN_PERSONA_INTERVAL: int = int(os.getenv("SCHEDULER_MAIN_PERSONA_INTERVAL", "2700"))
+
 SCHEDULER_ARTICLE_INTERVAL: int = int(os.getenv("SCHEDULER_ARTICLE_INTERVAL", "43200"))
 # Maximum articles per calendar day (2 = substantial but not overwhelming)
 MAX_ARTICLES_PER_DAY: int = int(os.getenv("MAX_ARTICLES_PER_DAY", "2"))
