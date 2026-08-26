@@ -14,10 +14,114 @@ Functions:
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _tokenize_text(value: str) -> set[str]:
+    """Normalize text into a lightweight token set for similarity checks."""
+    if not value:
+        return set()
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.lower())
+        if len(token) > 2
+    }
+
+
+def is_near_duplicate(candidate: str, recent_items: Sequence[str], threshold: float = 0.72) -> bool:
+    """Return True if a candidate looks too similar to a recent message."""
+    candidate_tokens = _tokenize_text(candidate)
+    if not candidate_tokens:
+        return False
+
+    for recent in recent_items:
+        recent_tokens = _tokenize_text(str(recent))
+        if not recent_tokens:
+            continue
+        shared = len(candidate_tokens & recent_tokens)
+        if shared == 0:
+            continue
+        union = len(candidate_tokens | recent_tokens)
+        score = shared / union if union else 0.0
+        if score >= threshold:
+            return True
+    return False
+
+
+def should_post(
+    *,
+    function_cooldown_ready: bool,
+    persona_cooldown_ready: bool,
+    not_duplicate: bool,
+    under_daily_cap: bool,
+    under_per_thread_cap: bool,
+) -> Tuple[bool, str]:
+    """Central governance gate for posting.
+
+    All relevant gates must be open, combined with AND semantics. The returned
+    reason is suitable for logs or debug output.
+    """
+    checks = [
+        (function_cooldown_ready, "function cooldown"),
+        (persona_cooldown_ready, "persona cooldown"),
+        (not_duplicate, "duplicate"),
+        (under_daily_cap, "daily cap"),
+        (under_per_thread_cap, "per-thread cap"),
+    ]
+    for is_open, label in checks:
+        if not is_open:
+            return False, f"blocked: {label}"
+    return True, "allowed"
+
+
+def evaluate_post_gate(
+    *,
+    repo,
+    persona_key: Optional[str],
+    candidate_text: str,
+    function_cooldown_seconds: int,
+    persona_cooldown_seconds: int,
+    recent_items: Optional[Sequence[str]] = None,
+    under_daily_cap: bool = True,
+    thread_post_count: Optional[int] = None,
+    per_thread_cap: Optional[int] = None,
+) -> Tuple[bool, str]:
+    """Compute a single post decision using the shared governance gate."""
+    recent_items = list(recent_items or [])
+
+    function_cooldown_ready = True
+    if function_cooldown_seconds > 0:
+        try:
+            function_cooldown_ready = repo.seconds_since_last_safe() is None or repo.seconds_since_last_safe() >= function_cooldown_seconds
+        except Exception:
+            function_cooldown_ready = True
+
+    persona_cooldown_ready = True
+    if persona_key:
+        try:
+            secs = repo.seconds_since_persona_last_posted_safe(persona_key)
+            persona_cooldown_ready = secs is None or secs >= persona_cooldown_seconds
+        except Exception:
+            persona_cooldown_ready = True
+
+    not_duplicate = not is_near_duplicate(candidate_text, recent_items)
+
+    if thread_post_count is not None and per_thread_cap is not None:
+        under_per_thread_cap = thread_post_count < per_thread_cap
+    else:
+        under_per_thread_cap = True
+
+    return should_post(
+        function_cooldown_ready=function_cooldown_ready,
+        persona_cooldown_ready=persona_cooldown_ready,
+        not_duplicate=not_duplicate,
+        under_daily_cap=bool(under_daily_cap),
+        under_per_thread_cap=under_per_thread_cap,
+    )
 
 # The three main community roles
 MAIN_ROLES = ("parent", "teacher", "student")
@@ -351,12 +455,17 @@ def _post_as_persona(
 
     prompt = (
         f"{persona.voice}\n\n"
+        f"Your role: {persona.role}. Your register: {persona.role_category}. "
+        f"Your perspective: {persona.bio}.\n"
+        f"Write as {persona.display_name}, not as a generic AI assistant. "
+        f"Keep the voice distinct, grounded, and authentic to this person.\n\n"
         f"Forum discussion title: {thread_title}\n\n"
         "Write a helpful, genuine reply to this discussion.\n"
         "Rules:\n"
         "- Plain text only, no Markdown.\n"
         "- 2-4 sentences maximum.\n"
         "- Sound like a real community member, not a robot.\n"
+        "- Act from this persona's role, register, and lived perspective.\n"
         "- Add real value: answer a question, share an insight, or invite others.\n"
         "- No greetings like 'Hello everyone'."
     )

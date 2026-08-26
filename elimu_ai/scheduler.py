@@ -101,7 +101,7 @@ def task_generate_discussions() -> str:
     try:
         # ── STEP 1: unanswered threads exist → answer them ─────────────────
         threads = get_unanswered_threads(cutoff_hours=3)
-        from elimu_ai.community_tasks import _get_post_count
+        from elimu_ai.community_tasks import _get_post_count, should_post, is_near_duplicate
         answerable = [t for t in threads if _get_post_count(t) == 1]
 
         if answerable:
@@ -126,32 +126,18 @@ def task_generate_discussions() -> str:
         )
 
         repo = _get_proactive_repo()
-
-        # Guard: daily limit
         today_count = repo.count_today_safe()
-        if today_count >= MAX_PROACTIVE_DISCUSSIONS_PER_DAY:
-            logger.info(
-                "generate_discussions: proactive generation skipped — "
-                "daily limit reached (%d/%d)",
-                today_count, MAX_PROACTIVE_DISCUSSIONS_PER_DAY,
-            )
-            return f"skipped_cooldown: daily limit {today_count}/{MAX_PROACTIVE_DISCUSSIONS_PER_DAY}"
-
-        # Guard: global cooldown
         secs = repo.seconds_since_last_safe()
-        if secs is not None and secs < PROACTIVE_DISCUSSION_COOLDOWN:
-            remaining = int(PROACTIVE_DISCUSSION_COOLDOWN - secs)
-            logger.info(
-                "generate_discussions: proactive generation skipped — "
-                "cooldown active (%ds remaining)", remaining,
-            )
-            return f"skipped_cooldown: {remaining}s remaining"
+        function_cooldown_ready = secs is None or secs >= PROACTIVE_DISCUSSION_COOLDOWN
+        under_daily_cap = today_count < MAX_PROACTIVE_DISCUSSIONS_PER_DAY
 
         # Select persona
         persona_name, persona_display = _select_persona(repo, PERSONA_COOLDOWN)
         logger.info(
             "generate_discussions: mode=proactive persona=%s", persona_name
         )
+        persona_secs = repo.seconds_since_persona_last_posted_safe(persona_name)
+        persona_cooldown_ready = persona_secs is None or persona_secs >= PERSONA_COOLDOWN
 
         # Select topic
         recent_topics = repo.get_recent_topics_safe(limit=15)
@@ -165,6 +151,28 @@ def task_generate_discussions() -> str:
                 persona=persona_name, topic="", status="skipped_duplicate"
             )
             return "skipped_duplicate: no fresh topic available"
+
+        allowed, gate_reason = should_post(
+            function_cooldown_ready=function_cooldown_ready,
+            persona_cooldown_ready=persona_cooldown_ready,
+            not_duplicate=not _is_duplicate(topic, recent_topics),
+            under_daily_cap=under_daily_cap,
+            under_per_thread_cap=True,
+        )
+        if not allowed:
+            logger.info(
+                "generate_discussions: proactive generation gate blocked persona=%s reason=%s",
+                persona_name,
+                gate_reason,
+            )
+            repo.log_discussion(persona=persona_name, topic=topic, status="skipped_gate", error=gate_reason)
+            if not function_cooldown_ready:
+                return f"skipped_cooldown: {int(max(PROACTIVE_DISCUSSION_COOLDOWN - (secs or 0), 0))}s remaining"
+            if not under_daily_cap:
+                return f"skipped_cooldown: daily limit {today_count}/{MAX_PROACTIVE_DISCUSSIONS_PER_DAY}"
+            if not persona_cooldown_ready:
+                return f"skipped_cooldown: persona cooldown {persona_name}"
+            return f"skipped_duplicate: {gate_reason}"
 
         # ── Forum discovery guard — search before creating ─────────────────
         # If a highly relevant existing thread already exists, continue it
@@ -272,7 +280,7 @@ def _try_continue_existing_thread() -> Optional[str]:
             THREAD_CONTINUATION_COOLDOWN,
             PERSONA_COOLDOWN,
         )
-        from elimu_ai.community_tasks import _get_post_count
+        from elimu_ai.community_tasks import _get_post_count, should_post, is_near_duplicate
 
         threads = get_active_threads_for_growth(
             min_posts=THREAD_MIN_POSTS_FOR_CONTINUATION,
@@ -310,6 +318,27 @@ def _try_continue_existing_thread() -> Optional[str]:
         thread_id = selected_thread.get("id")
         thread_title = selected_thread.get("title", "")
         post_count = _get_post_count(selected_thread)
+
+        recent_replies = [
+            str((post.get("content") or post.get("body") or ""))
+            for post in (selected_thread.get("posts") or [])
+            if isinstance(post, dict)
+        ]
+        allowed, gate_reason = should_post(
+            function_cooldown_ready=True,
+            persona_cooldown_ready=repo.seconds_since_persona_last_posted_safe(persona_name) is None or repo.seconds_since_persona_last_posted_safe(persona_name) >= THREAD_CONTINUATION_COOLDOWN,
+            not_duplicate=not is_near_duplicate(thread_title, recent_replies),
+            under_daily_cap=True,
+            under_per_thread_cap=post_count < THREAD_GROWTH_TARGET,
+        )
+        if not allowed:
+            logger.info(
+                "generate_discussions: continuation gate blocked thread=%d persona=%s reason=%s",
+                thread_id,
+                persona_name,
+                gate_reason,
+            )
+            return None
 
         result = _post_continuation_reply(
             thread_id=thread_id,
@@ -397,12 +426,17 @@ def _post_continuation_reply(
     context = topic_context or thread_title
     prompt = (
         f"{persona.voice}\n\n"
+        f"Your role: {persona.role}. Your register: {persona.role_category}. "
+        f"Your perspective: {persona.bio}.\n"
+        f"Write as {persona.display_name}, not as a generic AI assistant. "
+        f"Keep the voice distinct, grounded, and authentic to this person.\n\n"
         f"Discussion title: {thread_title}\n"
         f"Context: {context[:200]}\n\n"
         "Rules:\n"
         "- Plain text only, no Markdown.\n"
         "- 2-4 sentences maximum.\n"
         "- Sound like a genuine community member, not a robot.\n"
+        "- Act from this persona's role, register, and lived perspective.\n"
         "- Either answer a question, share an insight, or invite others to respond.\n"
         "- Do not just summarise the title — add real value.\n"
         "- No greetings like 'Hello everyone'."
@@ -649,10 +683,15 @@ def _create_discussion_as_persona(
 
     prompt = (
         f"{persona.voice}\n\n"
+        f"Your role: {persona.role}. Your register: {persona.role_category}. "
+        f"Your perspective: {persona.bio}.\n"
+        f"Write as {persona.display_name}, not as a generic AI assistant. "
+        f"Keep the voice distinct, grounded, and authentic to this person.\n\n"
         f"Topic: {topic}\n\n"
         "Rules:\n"
         "- Plain text only, no Markdown.\n"
         "- Sound like a real community member, not a robot.\n"
+        "- Act from this persona's role, register, and lived perspective.\n"
         "- Return valid JSON with exactly two keys: "
         '"title" (string, max 80 chars) and "body" (string, 2-4 sentences).\n'
         "- The body should invite others to share their thoughts.\n"
