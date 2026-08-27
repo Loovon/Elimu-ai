@@ -123,6 +123,14 @@ def test_moderate_flags_spam():
     result = moderate("buy now click here free money")
     assert "flagged" in result.lower() or "rejected" in result.lower()
 
+def test_moderate_flags_profanity():
+    result = moderate("fuck this")
+    assert "approved" not in result.lower()
+
+def test_moderate_does_not_flag_partial_word_matches():
+    result = moderate("This is a skillful science lesson")
+    assert result == "Content approved."
+
 def test_moderate_rejects_too_short():
     result = moderate("hi")
     assert "rejected" in result.lower()

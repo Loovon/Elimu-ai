@@ -248,6 +248,7 @@ class IntentAgent:
         """Keyword-based fallback when Gemini is unavailable."""
         from elimu_ai.intent import detect_intents
         from elimu_ai.tools.teacher import extract_context_hints
+        from elimu_ai.query_parser import QueryParser
 
         keyword_intents = detect_intents(question)
         intents = [
@@ -260,23 +261,34 @@ class IntentAgent:
         ]
 
         ctx = extract_context_hints(question)
+        parsed_queries = QueryParser()._regex_parse(question)
         entities = {
-            "grades":    [ctx["grade"]] if ctx.get("grade") else [],
-            "subjects":  [ctx["subject"]] if ctx.get("subject") else [],
-            "terms":     [ctx["term"]] if ctx.get("term") else [],
-            "years":     [ctx["year"]] if ctx.get("year") else [],
+            "grades":    list(dict.fromkeys(q.grade for q in parsed_queries if q.grade)),
+            "subjects":  list(dict.fromkeys(q.subject for q in parsed_queries if q.subject)),
+            "terms":     list(dict.fromkeys(q.term for q in parsed_queries if q.term)),
+            "years":     list(dict.fromkeys(q.year for q in parsed_queries if q.year)),
             "doc_types": [],
-            "audiences": [ctx["audience"]] if ctx.get("audience") else [],
+            "audiences": list(dict.fromkeys(q.audience for q in parsed_queries if q.audience)),
         }
 
-        sub_queries = []
-        if ctx.get("grade") or ctx.get("subject"):
+        sub_queries = [SubQuery(
+            grade=q.grade,
+            subject=q.subject,
+            term=q.term,
+            year=q.year,
+            doc_type=q.doc_type,
+            audience=q.audience,
+            original_fragment=q.original,
+        ) for q in parsed_queries if q.grade or q.subject]
+
+        if not sub_queries and (ctx.get("grade") or ctx.get("subject")):
             sub_queries = [SubQuery(
                 grade=ctx.get("grade"),
                 subject=ctx.get("subject"),
                 term=ctx.get("term"),
                 year=ctx.get("year"),
                 audience=ctx.get("audience"),
+                original_fragment=question,
             )]
 
         return IntentAnalysis(

@@ -79,6 +79,15 @@ class TestTwoPartQuery(unittest.TestCase):
             f"At least one subject should be extracted, got: {subjects}"
         )
 
+    def test_supervisor_fallback_keeps_each_grade_subject_target(self):
+        from elimu_ai.agents.intent_agent import IntentAgent
+        analysis = IntentAgent()._keyword_fallback(
+            "Recommend revision materials for science grade 3 and kiswahili grade 6 notes"
+        )
+        targets = {(q.grade, q.subject) for q in analysis.sub_queries}
+        self.assertIn(("grade3", "science"), targets)
+        self.assertIn(("grade6", "kiswahili"), targets)
+
 
 class TestThreePartQuery(unittest.TestCase):
     """Test 3: Three-part query → three ParsedQuery objects."""
