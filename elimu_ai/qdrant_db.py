@@ -23,6 +23,8 @@ from elimu_ai.gemini import embed as gemini_embed
 logger = logging.getLogger(__name__)
 
 _qdrant = None
+_dimension_client: Any = None
+_collection_dimensions: Dict[str, Optional[int]] = {}
 
 
 def _get_client():
@@ -118,6 +120,24 @@ def search(
     """
     client = _get_client()
     if client is None:
+        return []
+
+    # Never send a vector to an incompatible collection. This is especially
+    # important during migration from the old 384-dim index to 768 dimensions.
+    global _dimension_client
+    if _dimension_client is not client:
+        _dimension_client = client
+        _collection_dimensions.clear()
+    if collection not in _collection_dimensions:
+        info = get_collection_info(collection)
+        _collection_dimensions[collection] = info.get("vector_size")
+    collection_dim = _collection_dimensions[collection]
+    if isinstance(collection_dim, int) and collection_dim != EMBED_DIM:
+        logger.error(
+            "Qdrant search disabled: collection %s is %d-dim but EMBED_DIM=%d. "
+            "Rebuild the collection with ingest.py before enabling semantic search.",
+            collection, collection_dim, EMBED_DIM,
+        )
         return []
 
     vector = gemini_embed(query)

@@ -287,12 +287,16 @@ class SupervisorAgent:
         if not ctx_hints.get("subject") and entities.get("subjects"):
             ctx_hints["subject"] = entities["subjects"][0]
 
-        # Qdrant search
+        # Catalog-only requests do not need a semantic context search. Skipping
+        # it avoids an unnecessary embedding call and lets the local catalog
+        # remain usable while Qdrant collections are being migrated.
         hits = []
-        try:
-            hits = qdrant_search(question)
-        except Exception:
-            pass
+        retrieval_intents = {"teacher", "quiz", "search"}
+        if not analysis.intent_names or retrieval_intents.intersection(analysis.intent_names):
+            try:
+                hits = qdrant_search(question)
+            except Exception:
+                pass
 
         return build_context(
             question=question,

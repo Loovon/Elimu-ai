@@ -114,6 +114,18 @@ def test_qdrant_basic_search():
     print(f"  'photosynthesis' → {len(hits)} hits")
 
 
+def test_qdrant_skips_incompatible_collection(monkeypatch):
+    import elimu_ai.qdrant_db as qdb
+    monkeypatch.setattr(qdb, "_qdrant", object())
+    monkeypatch.setattr(qdb, "get_collection_info", lambda collection: {"vector_size": 384})
+    monkeypatch.setattr(qdb, "gemini_embed", lambda query: (_ for _ in ()).throw(
+        AssertionError("embedding must not be generated for incompatible collection")
+    ))
+    monkeypatch.setattr(qdb, "_dimension_client", None)
+    qdb._collection_dimensions.clear()
+    assert qdb.search("photosynthesis", collection="legacy_384") == []
+
+
 def test_qdrant_structured_search_grade4_maths():
     if _skip_no_gemini() or _skip_no_qdrant(): return
     from elimu_ai.qdrant_db import search
