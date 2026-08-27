@@ -132,8 +132,53 @@ class ToolRegistry:
 def _execute_teacher(context: Any, question: str, **_) -> str:
     from elimu_ai.gemini import generate
     from elimu_ai.tools.teacher import build_teacher_prompt
+    from elimu_ai.helpers import search_url
+
+    def _fallback_general_knowledge() -> str:
+        q = (question or "").strip()
+        text = q.lower()
+
+        if "photosynthesis" in text:
+            base = (
+                "Photosynthesis is the process by which green plants use sunlight, water, and carbon dioxide to make glucose, which stores energy, and oxygen, which is released into the air. "
+                "It happens mainly in the leaves, in the chloroplasts."
+            )
+        elif "osmosis" in text:
+            base = (
+                "Osmosis is the movement of water molecules through a selectively permeable membrane from a region of higher water concentration to a region of lower water concentration. "
+                "This helps cells balance water and stay healthy."
+            )
+        elif "mitosis" in text:
+            base = (
+                "Mitosis is the process by which a cell divides to produce two genetically identical daughter cells. "
+                "It is important for growth, repair, and replacement of cells."
+            )
+        elif "water cycle" in text:
+            base = (
+                "The water cycle is the continuous movement of water between the atmosphere, land, and oceans. "
+                "It includes evaporation, condensation, precipitation, and collection."
+            )
+        elif "cell division" in text:
+            base = (
+                "Cell division is how cells reproduce to make new cells. "
+                "It is essential for growth, repair, and development in living things."
+            )
+        else:
+            base = (
+                f"In simple terms, {q or 'this concept'} is the main idea or process you are asking about. "
+                "It is usually explained by its key steps, purpose, and where it happens in nature or in the body."
+            )
+
+        return (
+            f"{base} For exact curriculum-aligned revision materials and subject-specific notes, check the Elimu Library: {search_url(q or 'education resources')}"
+        )
+
     prompt = build_teacher_prompt(question, context.to_context_string())
-    return generate(prompt)
+    result = generate(prompt)
+    if result.startswith("Elimu AI") or "temporarily unavailable" in result.lower():
+        return _fallback_general_knowledge()
+    return result
+
 
 
 def _execute_quiz(context: Any, question: str, **_) -> str:

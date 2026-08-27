@@ -11,6 +11,7 @@ The final response is composed once and clearly labelled.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -27,6 +28,38 @@ from elimu_ai.query_parser import QueryParser, ParsedQuery
 logger = logging.getLogger(__name__)
 
 _query_parser = QueryParser()
+
+
+def _is_weak_or_unknown_query(question: str, intents: List[IntentResult]) -> bool:
+    """Return True when the request falls back to teacher mode without a real educational signal."""
+    if not question or not str(question).strip():
+        return False
+
+    text = question.lower()
+    intent_names = [i.name for i in intents]
+    if any(intent in intent_names for intent in ("quiz", "librarian", "recommendation", "community", "discussion", "catalog", "search", "general_chat")):
+        return False
+
+    teacher_intent = next((i for i in intents if i.name == "teacher"), None)
+    if teacher_intent is None or teacher_intent.confidence > 0.45:
+        return False
+
+    educational_markers = [
+        "explain", "what is", "how does", "why", "define", "teach me",
+        "biology", "chemistry", "physics", "history", "math", "mathematics",
+        "science", "grade", "form", "term", "revision", "exam", "notes",
+        "student", "teacher", "parent", "lesson", "school", "class", "subject",
+        "quiz", "practice", "test", "homework", "document", "resource",
+    ]
+    if any(marker in text for marker in educational_markers):
+        return False
+
+    # Default teacher fallback with no subject matter signal is a likely unhandled query.
+    tokens = re.findall(r"[a-z0-9]+", text)
+    if len(tokens) >= 4 and len(set(tokens)) >= 4:
+        return True
+
+    return False
 
 
 @dataclass
@@ -113,6 +146,22 @@ def run_orchestrator(
     had_error    = False
     error_detail = ""
     tool_outputs: Dict[str, str] = {}
+
+    # Unknown / off-topic questions should still be captured for learning,
+    # even when they do not map to a specific Elimu Library document request.
+    if _is_weak_or_unknown_query(question, intents):
+        try:
+            from elimu_ai.agents.learning import LearningAgent
+            LearningAgent().record_failure(
+                question=question,
+                intents=intent_names or ["teacher"],
+                tools_used=tools_used,
+                failure_reason="unknown_or_unhandled_query",
+                confidence=0.0,
+                suggested_fix="Add routing rules for this question pattern and keep it for retraining.",
+            )
+        except Exception:
+            pass
 
     # ── Multi-target retrieval ────────────────────────────────────────────────
     target_results: List[TargetResult] = []

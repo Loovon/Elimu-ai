@@ -84,6 +84,24 @@ def test_with_history():
     assert isinstance(result.answer, str)
 
 
+def test_simple_teacher_question_uses_general_knowledge_fallback():
+    result = run_orchestrator("Explain photosynthesis simply")
+    text = result.answer.lower()
+    assert "photosynthesis" in text
+    assert "sunlight" in text or "plants" in text
+    assert "elimu library" in text.lower() or "library" in text.lower()
+
+
+def test_unknown_queries_are_logged_for_retraining():
+    import unittest.mock as mock
+    from elimu_ai.agents.learning import LearningAgent
+
+    with mock.patch.object(LearningAgent, "record_failure") as record_failure:
+        result = run_orchestrator("xjklqz weird impossible request 345678")
+        assert isinstance(result.answer, str)
+        assert record_failure.called
+
+
 # ── _merge_outputs unit tests ─────────────────────────────────────────────────
 
 def test_merge_single_output():
