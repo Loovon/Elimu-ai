@@ -435,7 +435,18 @@ class SupervisorAgent:
                 keyword=params.get("question", question),
                 max_results=5,
             )
-            return format_recommendations(results, question) if results else ""
+            if results:
+                return format_recommendations(results, question)
+            from elimu_ai.tools.library import _category_fallback
+            return _category_fallback(
+                {
+                    "grade": params.get("grade"),
+                    "subject": params.get("subject"),
+                    "audience": params.get("audience"),
+                },
+                params.get("doc_type") or "",
+                params.get("question", question),
+            )
 
         # Qdrant search
         if action == "qdrant_search":

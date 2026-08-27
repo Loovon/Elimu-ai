@@ -178,11 +178,9 @@ def _score(
 def _load() -> None:
     """Load index and catalog from disk into module-level cache."""
     global _index, _catalog
-    if _index is None and _INDEX_PATH.exists():
-        try:
-            _index = json.loads(_INDEX_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            _index = {}
+    # The generated index can be tens of megabytes larger than the canonical
+    # catalog. The compact catalog is sufficient for bounded API searches and
+    # avoids loading a second large object graph into every Uvicorn worker.
     if _catalog is None and _CATALOG_PATH.exists():
         try:
             _catalog = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
@@ -378,14 +376,38 @@ def search_catalog(
                 year = ky
 
     elif _catalog:
-        # Fallback when index not built — linear scan of flat catalog
-        kw = (keyword or "").lower()
-        candidates = [
-            d for d in _catalog
-            if not kw
-            or kw in (d.get("title") or "").lower()
-            or kw in (d.get("description") or "").lower()
-        ]
+        # Compact catalog path: apply structured filters before ranking.
+        candidates = list(_catalog)
+        if g:
+            candidates = [d for d in candidates if _norm(d.get("grade", "")) == g]
+        if s:
+            candidates = [d for d in candidates if _norm(d.get("subject", "")) == s]
+        if aud:
+            audience_candidates = [
+                d for d in candidates if (d.get("audience") or "").lower() == aud
+            ]
+            if audience_candidates:
+                candidates = audience_candidates
+        if dt:
+            doctype_candidates = [
+                d for d in candidates
+                if dt in _norm(d.get("doctype", ""))
+                or dt in _norm(d.get("category", ""))
+            ]
+            if doctype_candidates:
+                candidates = doctype_candidates
+        if keyword:
+            words = [w for w in re.findall(r"[a-z0-9]+", keyword.lower()) if len(w) > 3]
+            keyword_candidates = [
+                d for d in candidates
+                if any(
+                    w in (d.get("title") or "").lower()
+                    or w in (d.get("description") or "").lower()
+                    for w in words
+                )
+            ]
+            if keyword_candidates:
+                candidates = keyword_candidates
 
     # ── Post-filter by term / year ─────────────────────────────────────────
     if candidates and term:

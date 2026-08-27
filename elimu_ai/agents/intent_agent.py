@@ -171,6 +171,12 @@ class IntentAgent:
         keyword_result = self._keyword_fallback(question)
         high_conf = [i for i in keyword_result.intents
                      if i.confidence >= self._SKIP_GEMINI_CONFIDENCE]
+        if any(i.name in {"recommendation", "librarian", "catalog"}
+               for i in high_conf) and not any(i.name == "quiz" for i in high_conf):
+            logger.debug(
+                "IntentAgent: skipping Gemini — strong library intent from keyword routing"
+            )
+            return keyword_result
         if len(high_conf) == self._MAX_SINGLE_INTENT_COUNT:
             logger.debug(
                 "IntentAgent: skipping Gemini — single high-confidence intent "
