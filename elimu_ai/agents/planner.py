@@ -217,7 +217,7 @@ class PlannerAgent:
             "year":     sq.year,
             "doc_type": sq.doc_type,
             "audience": sq.audience,
-            "question": question,
+            "question": sq.original_fragment or question,
         }
 
     def _action_for_intent(self, intent: str) -> Optional[str]:

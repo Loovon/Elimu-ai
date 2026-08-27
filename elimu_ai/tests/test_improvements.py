@@ -66,6 +66,13 @@ class TestIntentAgentSkipsGemini(unittest.TestCase):
             self.agent.analyse("quiz me on biology and recommend Grade 6 Maths notes")
         mock_sc.assert_called_once()
 
+    def test_semantic_prompt_formats_json_without_error(self):
+        from elimu_ai.agents.intent_agent import IntentAgent
+        with patch("elimu_ai.gemini.generate", return_value='{"intents": [{"name": "recommendation", "confidence": 0.9}], "entities": {}, "sub_queries": []}'):
+            result = IntentAgent()._semantic_classify("recommend Grade 3 science notes")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.primary, "recommendation")
+
 
 # ── B. Query parser ───────────────────────────────────────────────────────────
 

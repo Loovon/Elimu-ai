@@ -324,8 +324,7 @@ def search_catalog(
             if not all_subj:
                 all_subj = list(_index.get("by_subject", {}).get(_norm(subject), []))
             if all_subj and g:
-                grade_filtered = [d for d in all_subj if _norm(d.get("grade", "")) == g]
-                candidates = grade_filtered if grade_filtered else all_subj
+                candidates = [d for d in all_subj if _norm(d.get("grade", "")) == g]
             else:
                 candidates = all_subj
 

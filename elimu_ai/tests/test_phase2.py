@@ -88,6 +88,17 @@ class TestTwoPartQuery(unittest.TestCase):
         self.assertIn(("grade3", "science"), targets)
         self.assertIn(("grade6", "kiswahili"), targets)
 
+    def test_compound_catalog_steps_use_their_own_fragments(self):
+        from elimu_ai.agents.intent_agent import IntentAgent
+        from elimu_ai.agents.planner import PlannerAgent
+        question = "Recommend revision materials for science grade 3 and kiswahili grade 6 notes"
+        analysis = IntentAgent()._keyword_fallback(question)
+        steps = [s for s in PlannerAgent().plan(analysis, question).steps
+                 if s.action == "catalog_search"]
+        self.assertEqual(len(steps), 2)
+        self.assertIn("science", steps[0].params["question"].lower())
+        self.assertIn("kiswahili", steps[1].params["question"].lower())
+
 
 class TestThreePartQuery(unittest.TestCase):
     """Test 3: Three-part query → three ParsedQuery objects."""

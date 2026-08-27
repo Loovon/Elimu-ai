@@ -71,25 +71,25 @@ Rules:
 - Normalise synonyms: "maths"→"mathematics", "bio"→"biology", "g6"→"grade6", etc.
 
 Return ONLY valid JSON in this exact format:
-{
-  "intents": [
-    {"name": "recommendation", "confidence": 0.95},
-    {"name": "quiz", "confidence": 0.85}
+{{
+    "intents": [
+        {{"name": "recommendation", "confidence": 0.95}},
+        {{"name": "quiz", "confidence": 0.85}}
   ],
-  "entities": {
+    "entities": {{
     "grades": ["grade4", "grade6"],
     "subjects": ["mathematics", "kiswahili"],
     "terms": ["2"],
     "years": [],
     "doc_types": ["notes", "scheme of work"],
     "audiences": ["student"]
-  },
-  "sub_queries": [
-    {"grade": "grade4", "subject": "mathematics", "term": "2", "doc_type": "notes"},
-    {"grade": "grade6", "subject": "kiswahili", "term": "2", "doc_type": "notes"}
+    }},
+    "sub_queries": [
+        {{"grade": "grade4", "subject": "mathematics", "term": "2", "doc_type": "notes"}},
+        {{"grade": "grade6", "subject": "kiswahili", "term": "2", "doc_type": "notes"}}
   ],
   "reasoning": "User wants notes for two different grades and subjects"
-}
+}}
 
 User message: {question}
 """
