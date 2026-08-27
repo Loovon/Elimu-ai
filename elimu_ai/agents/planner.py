@@ -109,6 +109,11 @@ class PlannerAgent:
         gen_ids: List[int] = []
         for intent in analysis.intents:
             gen_action = self._generation_action(intent.name)
+            # Sub-query catalog searches already produce the final, evidence-
+            # backed recommendation. Running the generic recommendation or
+            # librarian tool afterwards repeats the same material block.
+            if analysis.sub_queries and intent.name in {"recommendation", "librarian"}:
+                continue
             if gen_action and gen_action not in [s.action for s in steps]:
                 steps.append(PlanStep(
                     step_id=step_id,

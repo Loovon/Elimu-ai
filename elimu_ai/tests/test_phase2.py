@@ -131,6 +131,24 @@ class TestORConjunction(unittest.TestCase):
         except Exception as exc:
             self.fail(f"OR query raised an exception: {exc}")
 
+    def test_compound_separators_preserve_targets(self):
+        from elimu_ai.query_parser import QueryParser
+        result = QueryParser().parse(
+            "Grade 5 Science notes, Kiswahili Grade 7 notes or Grade 8 Maths revision"
+        )
+        self.assertGreaterEqual(len(result), 3)
+        subjects = {q.subject for q in result}
+        self.assertIn("science", subjects)
+        self.assertIn("kiswahili", subjects)
+        self.assertIn("mathematics", subjects)
+
+    def test_shared_context_is_inherited(self):
+        from elimu_ai.query_parser import QueryParser
+        result = QueryParser().parse("Grade 8 Biology and Chemistry revision")
+        self.assertEqual(len(result), 2)
+        self.assertEqual({q.grade for q in result}, {"grade8"})
+        self.assertEqual({q.doc_type for q in result}, {"revision"})
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6: Follow-up query / memory

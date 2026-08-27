@@ -239,8 +239,8 @@ class QueryParser:
         """
         from elimu_ai.catalog_search import _extract_from_keyword
 
-        # Split on "and" to handle compound queries
-        parts = re.split(r"\band\b", question, flags=re.IGNORECASE)
+        # Split common compound-query separators while retaining each target.
+        parts = re.split(r"\b(?:and|or|then)\b|[;,]", question, flags=re.IGNORECASE)
 
         queries = []
         for part in parts:
@@ -273,6 +273,22 @@ class QueryParser:
                 audience=audience,
                 original=part,
             ))
+
+        # Carry shared request context into fragments that omit it. For
+        # example, "Grade 8 Biology and Chemistry revision" means Grade 8,
+        # revision for both subjects.
+        if queries:
+            shared_grade = next((q.grade for q in queries if q.grade), None)
+            shared_term = next((q.term for q in queries if q.term), None)
+            shared_year = next((q.year for q in queries if q.year), None)
+            shared_doc_type = next((q.doc_type for q in queries if q.doc_type), None)
+            shared_audience = next((q.audience for q in queries if q.audience), None)
+            for query in queries:
+                query.grade = query.grade or shared_grade
+                query.term = query.term or shared_term
+                query.year = query.year or shared_year
+                query.doc_type = query.doc_type or shared_doc_type
+                query.audience = query.audience or shared_audience
 
         # If nothing found, return a single query for the full question
         if not queries or all(

@@ -356,7 +356,10 @@ class SupervisorAgent:
                         try:
                             result = future.result()
                             if result:
-                                tool_outputs[step.action] = result
+                                output_key = step.action
+                                if output_key in tool_outputs:
+                                    output_key = f"{step.action}_{step.step_id}"
+                                tool_outputs[output_key] = result
                                 if not step.action.startswith("_"):
                                     tools_used.append(step.action)
                                     sub_results.append({
@@ -377,7 +380,10 @@ class SupervisorAgent:
                 try:
                     result = self._execute_step(step, ctx, question, analysis)
                     if result:
-                        tool_outputs[step.action] = result
+                        output_key = step.action
+                        if output_key in tool_outputs:
+                            output_key = f"{step.action}_{step.step_id}"
+                        tool_outputs[output_key] = result
                         if not step.action.startswith("_"):
                             tools_used.append(step.action)
                 except Exception as exc:
@@ -462,20 +468,24 @@ class SupervisorAgent:
         if not clean:
             return "I wasn't able to find information on that. Please try rephrasing your question."
 
-        if len(clean) == 1:
-            return list(clean.values())[0]
+        clean_values = _deduplicate_output_blocks(list(clean.values()))
+        if len(clean_values) == 1:
+            return clean_values[0]
 
         # Order: teacher/quiz → recommendation/librarian → community → catalog
         order = ["teacher", "quiz", "recommendation", "librarian",
                  "community", "moderation", "catalog"]
         parts = []
+        consumed = set()
         for name in order:
-            if name in clean:
-                parts.append(clean[name])
+            for key, value in clean.items():
+                if key == name or key.startswith(name + "_"):
+                    parts.extend(_deduplicate_output_blocks([value]))
+                    consumed.add(key)
         # Add anything not in the order list
         for name, val in clean.items():
-            if name not in order:
-                parts.append(val)
+            if name not in consumed:
+                parts.extend(_deduplicate_output_blocks([val]))
 
         return "\n\n".join(parts)
 
@@ -567,3 +577,15 @@ class SupervisorAgent:
                 memory_store.save_summary(session_id, user_id=user_id)
         except Exception as exc:
             logger.debug("Supervisor memory: %s", exc)
+
+
+def _deduplicate_output_blocks(values: List[str]) -> List[str]:
+    """Remove repeated full tool outputs while preserving retrieval order."""
+    unique: List[str] = []
+    seen = set()
+    for value in values:
+        normalized = " ".join((value or "").split()).lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            unique.append(value)
+    return unique

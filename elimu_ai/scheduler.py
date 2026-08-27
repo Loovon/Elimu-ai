@@ -13,6 +13,7 @@ import signal
 import threading
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from elimu_ai.config import (
@@ -35,6 +36,8 @@ from elimu_ai.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+_NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
 
 scheduler_status: Dict[str, Any] = {
     "running":    False,
@@ -1302,7 +1305,7 @@ def _make_job(name: str, fn: Callable[[], str]) -> Callable[[], None]:
             result = f"Error: {exc}"
             logger.error("scheduler [%s] raised: %s", name, exc)
         duration_ms = int((time.monotonic() - t0) * 1000)
-        now      = datetime.now(tz=timezone.utc).isoformat()
+        now      = datetime.now(tz=_NAIROBI_TZ).isoformat()
         is_error = result.startswith("Error:")
         scheduler_status["last_run"][name] = {"at": now, "result": result}
         if is_error:
