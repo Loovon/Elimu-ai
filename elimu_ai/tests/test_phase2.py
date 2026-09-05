@@ -446,6 +446,82 @@ class TestVulgarContent(unittest.TestCase):
         self.assertNotEqual(result, "Content approved.")
 
 
+class TestAnomalyGuardrails(unittest.TestCase):
+    """Regression tests for generated-text safety checks."""
+
+    def test_valid_educational_response_is_approved(self):
+        from elimu_ai.tools.moderation import moderate
+        self.assertEqual(moderate("What is photosynthesis?"), "Content approved.")
+
+    def test_failure_message_is_rejected(self):
+        from elimu_ai.tools.moderation import moderate
+        result = moderate("Elimu AI could not generate a response right now. Please try again in a moment.")
+        self.assertNotEqual(result, "Content approved.")
+
+    def test_traceback_is_rejected(self):
+        from elimu_ai.tools.moderation import moderate
+        text = "Traceback (most recent call last):\n  File \"app.py\", line 10, in <module>\n    raise ValueError('bad')"
+        self.assertNotEqual(moderate(text), "Content approved.")
+
+    def test_legitimate_error_question_is_allowed(self):
+        from elimu_ai.tools.moderation import moderate
+        text = "What errors do students commonly make when balancing chemical equations?"
+        self.assertEqual(moderate(text), "Content approved.")
+
+    def test_persona_display_uses_human_name(self):
+        from elimu_ai.personas.named import get_persona_by_username
+        persona = get_persona_by_username("grace_wanjiku")
+        self.assertIsNotNone(persona)
+        self.assertEqual(persona.display_name, "Grace Wanjiku")
+        self.assertEqual(persona.username, "grace_wanjiku")
+
+    def test_persona_resolution_preserves_internal_identity(self):
+        from elimu_ai.personas.named import get_persona
+        persona = get_persona("teacher_03")
+        self.assertIsNotNone(persona)
+        self.assertEqual(persona.key, "teacher_03")
+        self.assertEqual(persona.username, "esther_achieng")
+        self.assertEqual(persona.display_name, "Esther Achieng")
+
+    def test_failed_community_generation_does_not_publish(self):
+        from unittest.mock import patch
+        from elimu_ai.tools.forum import create_discussion
+
+        with patch("elimu_ai.tools.forum.find_existing_threads", return_value=None), \
+             patch("elimu_ai.tools.forum.generate_forum_post", return_value={"title": "Failure", "body": "Elimu AI could not generate a response right now. Please try again in a moment."}), \
+             patch("elimu_ai.tools.forum.save_forum_post") as mock_save:
+            result = create_discussion("what is photosynthesis")
+
+        self.assertIn("Discussion generation failed", result)
+        mock_save.assert_not_called()
+
+    def test_valid_community_generation_sends_persona_metadata(self):
+        from unittest.mock import patch
+        from elimu_ai.tools.forum import save_forum_post
+
+        with patch("elimu_ai.http_client.get_client") as mock_get_client:
+            mock_client = mock_get_client.return_value
+            mock_client.create_discussion.return_value = {"slug": "test-title", "category_name": "revision"}
+            save_forum_post("Test Title", "Useful content", "revision", persona_key="teacher_03")
+
+        kwargs = mock_client.create_discussion.call_args.kwargs
+        self.assertEqual(kwargs["persona_key"], "teacher_03")
+        self.assertEqual(kwargs["title"], "Test Title")
+        self.assertEqual(kwargs["category"], "revision")
+
+    def test_scheduler_failure_is_nonfatal(self):
+        from unittest.mock import patch
+        from elimu_ai.scheduler import _post_continuation_reply
+
+        with patch("elimu_ai.gemini.generate", return_value="Elimu AI could not generate a response right now. Please try again in a moment."), \
+             patch("elimu_ai.personas.named.get_persona") as mock_get_persona:
+            mock_persona = type("Persona", (), {"key": "teacher_03", "username": "esther_achieng", "display_name": "Esther Achieng", "role": "Teacher", "role_category": "teacher", "bio": "Teacher", "voice": "You are Esther."})()
+            mock_get_persona.return_value = mock_persona
+            result = _post_continuation_reply(42, "Test thread", "teacher_03")
+
+        self.assertFalse(result)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 19–20: Article generation
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 from elimu_ai.gemini import generate
 from elimu_ai.personas import COMMUNITY
 from elimu_ai.prompts import FORUM_POST_PROMPT
+from elimu_ai.tools.moderation import validate_generated_content
 
 logger = logging.getLogger(__name__)
 
@@ -46,21 +47,43 @@ def _simple_slug(title: str) -> str:
 
 # ── Gemini-based content generation ──────────────────────────────────────────
 
-def generate_forum_post(topic: str) -> Dict[str, str]:
+def generate_forum_post(topic: str) -> Optional[Dict[str, str]]:
     """
     Ask Gemini to generate a forum post for the topic.
-    Returns {title: str, body: str}. Falls back to plain text on parse failure.
+    Returns {title: str, body: str} only when safe content is produced.
     """
     prompt = FORUM_POST_PROMPT.format(topic=topic)
     raw = generate(prompt)
+    if not validate_generated_content(raw, context="forum-generation"):
+        logger.warning("forum: generated content rejected as anomalous for topic=%r", topic)
+        try:
+            from elimu_ai.agents.learning import LearningAgent
+            LearningAgent().record_failure(
+                question=topic,
+                intents=["forum_generation"],
+                tools_used=["gemini", "forum"],
+                failure_reason="generated content rejected as anomalous",
+            )
+        except Exception:
+            pass
+        return None
+
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group())
+            data = json.loads(match.group())
+            title = str(data.get("title", f"Discussion: {topic}")).strip()
+            body = str(data.get("body", raw)).strip()
+            if not validate_generated_content(title + "\n" + body, context="forum-json"):
+                return None
+            return {"title": title, "body": body}
         except Exception:
             pass
     logger.warning("forum: could not parse JSON from Gemini — using plain fallback.")
-    return {"title": f"Discussion: {topic}", "body": raw.strip()}
+    fallback = {"title": f"Discussion: {topic}", "body": raw.strip()}
+    if not validate_generated_content(fallback["title"] + "\n" + fallback["body"], context="forum-plain"):
+        return None
+    return fallback
 
 
 # ── HTTP-based forum operations ───────────────────────────────────────────────
@@ -115,10 +138,33 @@ def save_forum_post(
     persona_key (optional): stable named-persona identifier sent to Django
     so the thread author is correctly attributed.
     """
+    combined = f"{title}\n{body}"
+    if not validate_generated_content(combined, context="discussion-publication"):
+        logger.warning("forum.save_forum_post: rejected publication for persona=%s due to anomalous content", persona_key or "none")
+        try:
+            from elimu_ai.agents.learning import LearningAgent
+            LearningAgent().record_failure(
+                question=title,
+                intents=["forum_publication"],
+                tools_used=["forum", "http_client"],
+                failure_reason="rejected discussion before API publication",
+            )
+        except Exception:
+            pass
+        return None
+
     key = idempotency_key or f"ai-discussion-{uuid.uuid5(uuid.NAMESPACE_URL, title).hex}"
     try:
         from elimu_ai.http_client import get_client
         client = get_client()
+        payload = {
+            "title": title,
+            "body": body,
+            "category": category_slug,
+            "ai_generated": True,
+        }
+        if persona_key:
+            payload.update(client._persona_fields(persona_key))
         result = client.create_discussion(
             title=title,
             body=body,
@@ -149,10 +195,17 @@ def create_discussion(topic: str) -> str:
         return existing
 
     post_data = generate_forum_post(topic)
-    title = post_data.get("title", f"Discussion: {topic}")
-    body  = post_data.get("body", topic)
-    cat   = _pick_category(topic)
+    if not post_data:
+        logger.warning("forum.create_discussion: safe failure state for topic=%r", topic)
+        return "Discussion generation failed. Please try again later."
 
+    title = str(post_data.get("title", f"Discussion: {topic}")).strip()
+    body  = str(post_data.get("body", topic)).strip()
+    if not validate_generated_content(f"{title}\n{body}", context="discussion-content"):
+        logger.warning("forum.create_discussion: rejected generated discussion content for topic=%r", topic)
+        return "Discussion generation failed. Please try again later."
+
+    cat = _pick_category(topic)
     thread = save_forum_post(title, body, cat)
     if thread:
         slug = thread.get("slug") or _simple_slug(title)
@@ -204,6 +257,20 @@ def post_ai_answer(
     persona_key (optional): stable named-persona identifier sent to Django
     so the reply author is correctly attributed.
     """
+    if not validate_generated_content(content, context="reply-publication"):
+        logger.warning("forum.post_ai_answer: rejected publication for thread=%d persona=%s due to anomaly", thread_id, persona_key or "none")
+        try:
+            from elimu_ai.agents.learning import LearningAgent
+            LearningAgent().record_failure(
+                question=content[:200],
+                intents=["forum_reply"],
+                tools_used=["forum", "http_client"],
+                failure_reason="rejected reply before API publication",
+            )
+        except Exception:
+            pass
+        return False
+
     key = idempotency_key or f"ai-forum-answer-{thread_id}"
     try:
         from elimu_ai.http_client import get_client
