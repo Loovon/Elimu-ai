@@ -188,7 +188,7 @@ class ElimuAPIClient:
                     if isinstance(exc, rex.Timeout):
                         last_exc = HTTPTimeoutError(f"Timeout on {url}")
                     elif isinstance(exc, rex.ConnectionError):
-                        last_exc = HTTPClientError(f"Connection failed: {url}")
+                        last_exc = HTTPClientError(f"Connection failed: {url} ({exc})")
                     else:
                         last_exc = exc
                 except ImportError:
