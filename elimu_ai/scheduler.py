@@ -231,6 +231,18 @@ def task_generate_discussions() -> str:
             )
             return f"Error: proactive generation failed: {exc}"
 
+        if not result_text.startswith("created:"):
+            repo.log_discussion(
+                persona=persona_name, topic=topic,
+                status="failed_publication", duration_ms=duration_ms,
+                error=result_text,
+            )
+            logger.warning(
+                "generate_discussions: content generated but not published "
+                "persona=%s result=%r", persona_name, result_text[:120],
+            )
+            return f"skipped: discussion not published for persona={persona_name}"
+
         repo.log_discussion(
             persona=persona_name, topic=topic,
             status="created_proactive_discussion", duration_ms=duration_ms,
@@ -455,6 +467,32 @@ def _post_continuation_reply(
         reply = reply.strip()
         if len(reply) < 30:
             return False
+
+        # Add evidence-backed Elimu Library links when the thread context
+        # identifies matching material. No link is invented if retrieval has
+        # no document evidence.
+        try:
+            import re
+            from elimu_ai.helpers import referral_url
+            from elimu_ai.tools.library import find_materials
+
+            materials = find_materials(question=context or thread_title)
+            urls = []
+            for url in re.findall(
+                r"https?://www\.elimulibrary\.com/site/document/[^\s\)\]\"']+",
+                materials or "",
+            ):
+                clean_url = referral_url(url.rstrip(".,;:"))
+                if clean_url not in urls:
+                    urls.append(clean_url)
+                if len(urls) >= 3:
+                    break
+            if urls:
+                reply += "\n\nUseful Elimu Library materials:\n" + "\n".join(urls)
+        except Exception as exc:
+            logger.debug(
+                "_post_continuation_reply: library links unavailable: %s", exc
+            )
 
         ok = post_moderated_reply(
             thread_id=thread_id,
@@ -736,8 +774,9 @@ def _create_discussion_as_persona(
         )
         return f"created: /thread/{slug}/"
 
-    # API unavailable — graceful degradation
-    return f"generated (API unavailable): {title}"
+    # Generation succeeded, but the publication boundary rejected or could
+    # not persist the thread. This is not a created discussion.
+    return f"not_published: {title}"
 
 
 def task_recommend_resources() -> str:

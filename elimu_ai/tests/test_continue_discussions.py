@@ -221,7 +221,8 @@ class TestPersonaKeyPreserved(unittest.TestCase):
         from elimu_ai.personas.named import get_persona
 
         with patch("elimu_ai.tools.forum.post_moderated_reply") as mock_pmr, \
-             patch("elimu_ai.gemini.generate", return_value="A meaningful educational reply about KCSE."):
+             patch("elimu_ai.gemini.generate", return_value="A meaningful educational reply about KCSE."), \
+             patch("elimu_ai.tools.library.find_materials", return_value=""):
             mock_pmr.return_value = True
             _post_continuation_reply(
                 thread_id=52,
@@ -234,6 +235,27 @@ class TestPersonaKeyPreserved(unittest.TestCase):
         self.assertEqual(call_kwargs.get("persona_key"), "teacher_01")
         # Confirm it's a valid NamedPersona key
         self.assertIsNotNone(get_persona("teacher_01"))
+
+    def test_continuation_reply_includes_referral_library_link(self):
+        from elimu_ai.scheduler import _post_continuation_reply
+
+        library_result = (
+            "Here are materials:\n"
+            "https://www.elimulibrary.com/site/document/123/chemistry-notes"
+        )
+        with patch("elimu_ai.tools.forum.post_moderated_reply", return_value=True) as mock_pmr, \
+             patch("elimu_ai.gemini.generate", return_value="A meaningful educational reply about Chemistry."), \
+             patch("elimu_ai.tools.library.find_materials", return_value=library_result):
+            result = _post_continuation_reply(
+                thread_id=52,
+                thread_title="KCSE Chemistry revision",
+                persona_name="teacher_01",
+            )
+
+        self.assertTrue(result)
+        content = mock_pmr.call_args.kwargs["content"]
+        self.assertIn("Useful Elimu Library materials:", content)
+        self.assertIn("?rid=elm-elimutalks-1", content)
 
     def test_unanswered_thread_reply_uses_named_persona_key(self):
         from elimu_ai.scheduler import _participate_unanswered_thread
