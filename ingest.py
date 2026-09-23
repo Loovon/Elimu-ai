@@ -31,6 +31,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, urlunparse
 
 # ── Load .env before anything else ───────────────────────────────────────────
 try:
@@ -55,11 +56,16 @@ INDEX_FILE        = BASE_DIR / "elimu_index.json"
 REF_SUFFIX = "?ref=elimutalks&return_url=https%3A%2F%2Felimitalks.com"
 
 
+def _canonical_url(url: str) -> str:
+    parsed = urlparse((url or "").strip())
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _deterministic_id(url: str) -> int:
     """Stable 63-bit integer ID from a document URL."""
-    h = hashlib.sha256(url.encode("utf-8")).digest()
+    h = hashlib.sha256(_canonical_url(url).encode("utf-8")).digest()
     return int.from_bytes(h[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
@@ -99,6 +105,10 @@ def _build_search_text(doc: Dict[str, Any]) -> str:
         parts.append(f"Audience: {doc['audience']}")
     if doc.get("doctype"):
         parts.append(f"Type: {doc['doctype']}")
+    if doc.get("keywords"):
+        parts.append(f"Keywords: {doc['keywords']}")
+    if doc.get("content"):
+        parts.append(f"Page content: {str(doc['content'])[:5000]}")
     # Use _chroma_text if available (already rich)
     if doc.get("_chroma_text"):
         return doc["_chroma_text"]
@@ -107,13 +117,13 @@ def _build_search_text(doc: Dict[str, Any]) -> str:
 
 def _build_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
     """Build the complete Qdrant point payload from a catalogue record."""
-    url = doc.get("url", "") or ""
+    url = _canonical_url(doc.get("url", "") or "")
     referral = _add_referral(url)
     from datetime import datetime, timezone
     return {
-        "source":       "elimu_catalogue",
-        "source_file":  "elimu_catalogue.json",
-        "source_type":  "catalog",           # trusted source — never AI-generated
+        "source":       doc.get("source_type") or "elimu_catalogue",
+        "source_file":  doc.get("source_file") or "elimu_catalogue.json",
+        "source_type":  doc.get("source_type") or "catalog",
         "ingested_at":  datetime.now(tz=timezone.utc).isoformat(),
         "title":        (doc.get("title") or "").strip(),
         "description":  (doc.get("description") or "").strip(),
@@ -127,6 +137,7 @@ def _build_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
         "category":     (doc.get("category") or "").strip(),
         "audience":     (doc.get("audience") or "").lower().strip(),
         "doctype":      (doc.get("doctype") or "").strip(),
+        "keywords":     (doc.get("keywords") or "").strip(),
         "price":        doc.get("price"),
         "text":         _build_search_text(doc),
     }
@@ -134,15 +145,15 @@ def _build_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_canonical_records() -> List[Dict[str, Any]]:
+def load_canonical_records(catalogue_file: Path = CATALOGUE_FILE) -> List[Dict[str, Any]]:
     """
     Load and deduplicate catalogue records.
     Primary: elimu_catalogue.json (richer, 12746 records)
     Secondary: elimu_catalog.json fills in any URLs not in primary
     Returns deduplicated list keyed by URL.
     """
-    logger.info("Loading primary catalogue: %s", CATALOGUE_FILE)
-    primary = json.loads(CATALOGUE_FILE.read_text(encoding="utf-8"))
+    logger.info("Loading primary catalogue: %s", catalogue_file)
+    primary = json.loads(catalogue_file.read_text(encoding="utf-8"))
     logger.info("  %d records in primary catalogue", len(primary))
 
     logger.info("Loading secondary catalog: %s", CATALOG_FILE)
@@ -154,18 +165,18 @@ def load_canonical_records() -> List[Dict[str, Any]]:
     skipped_no_url = 0
 
     for doc in primary:
-        url = (doc.get("url") or "").strip()
+        url = _canonical_url(doc.get("url") or "")
         if not url:
             skipped_no_url += 1
             continue
-        by_url[url] = doc
+        by_url[url] = {**doc, "url": url}
 
     for doc in secondary:
-        url = (doc.get("url") or "").strip()
+        url = _canonical_url(doc.get("url") or "")
         if not url:
             continue
         if url not in by_url:
-            by_url[url] = doc  # only add if not already from primary
+            by_url[url] = {**doc, "url": url}  # only add if not already from primary
 
     canonical = list(by_url.values())
     logger.info(
@@ -210,6 +221,7 @@ def run_ingest(
     batch_size: int = 50,
     dry_run: bool = False,
     max_records: Optional[int] = None,
+    catalogue_file: Path = CATALOGUE_FILE,
 ) -> int:
     from elimu_ai.config import QDRANT_URL, QDRANT_API_KEY, EMBED_DIM
     from elimu_ai.gemini import embed
@@ -225,7 +237,7 @@ def run_ingest(
         logger.error("qdrant-client not installed. Run: pip install qdrant-client")
         sys.exit(1)
 
-    records = load_canonical_records()
+    records = load_canonical_records(catalogue_file)
     if max_records:
         records = records[:max_records]
         logger.info("Limiting to %d records (--max-records).", max_records)
@@ -361,6 +373,12 @@ def main():
                         help="Limit for testing (omit to ingest all)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Load and validate data without writing to Qdrant")
+    parser.add_argument("--sitemap", action="append", dest="sitemaps", default=[],
+                        help="Sitemap or sitemap-index URL to crawl before ingesting; repeatable")
+    parser.add_argument("--crawl-only", action="store_true",
+                        help="Crawl and merge sitemap data, but do not call Qdrant")
+    parser.add_argument("--catalogue-output", type=Path, default=CATALOGUE_FILE,
+                        help="Catalogue JSON file to enrich (default: elimu_catalogue.json)")
     parser.add_argument("--validate", action="store_true",
                         help="Validate an existing collection without ingesting")
     parser.add_argument("--delete-old", action="store_true",
@@ -370,6 +388,16 @@ def main():
     parser.add_argument("--confirm", action="store_true",
                         help="Confirm destructive operations")
     args = parser.parse_args()
+
+    if args.sitemaps:
+        from crawler import crawl_sitemaps, merge_catalogue
+        stats = merge_catalogue(crawl_sitemaps(args.sitemaps), args.catalogue_output)
+        logger.info(
+            "Sitemap enrichment complete: total=%d added=%d enriched=%d output=%s",
+            stats["total"], stats["added"], stats["enriched"], args.catalogue_output,
+        )
+        if args.crawl_only:
+            return
 
     if args.validate:
         ok = validate_collection(args.collection)
@@ -395,6 +423,7 @@ def main():
         batch_size=args.batch_size,
         dry_run=args.dry_run,
         max_records=args.max_records,
+        catalogue_file=args.catalogue_output,
     )
 
     if not args.dry_run and upserted > 0:
