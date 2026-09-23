@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger("elimu_crawler")
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CATALOGUE = BASE_DIR / "elimu_catalogue.json"
-SITEMAP_NS = {"sm": "https://www.elimulibrary.com/sitemap.xml"}
+SITEMAP_NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 
 
 def canonical_url(url: str) -> str:
