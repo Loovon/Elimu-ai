@@ -116,18 +116,57 @@ class SitemapCrawler:
         return list(dict.fromkeys(locations))
 
     def scrape(self, url):
-        response = requests.get(url, timeout=30)
+        """Fetch and parse one Elimu Library page."""
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": "ElimuSitemapMonitor/1.0",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            timeout=30,
+        )
         response.raise_for_status()
+    
         soup = BeautifulSoup(response.text, "html.parser")
+    
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
-        description_tag = soup.find("meta", attrs={"name": "description"})
-        keywords_tag = soup.find("meta", attrs={"name": "keywords"})
-        description = description_tag.get("content", "") if description_tag else ""
-        keywords = keywords_tag.get("content", "") if keywords_tag else ""
+    
+        description_tag = soup.find(
+            "meta",
+            attrs={"name": "description"},
+        )
+        keywords_tag = soup.find(
+            "meta",
+            attrs={"name": "keywords"},
+        )
+    
+        description = (
+            description_tag.get("content", "")
+            if description_tag
+            else ""
+        )
+    
+        keywords = (
+            keywords_tag.get("content", "")
+            if keywords_tag
+            else ""
+        )
+    
         canonical = canonical_url(url)
-        return {"url": canonical, "title": title, "description": description, "keywords": keywords, "content": soup.get_text(" ", strip=True), **infer_metadata(canonical, title, description)}
-
-
+    
+        return {
+            "url": canonical,
+            "title": title,
+            "description": description,
+            "keywords": keywords,
+            "content": soup.get_text(" ", strip=True),
+            **infer_metadata(
+                canonical,
+                title,
+                description,
+            ),
+        }
+        
 def crawl_sitemaps(sitemaps: Iterable[str]) -> List[Dict]:
     """Crawl multiple sitemap files and deduplicate URLs across sources."""
     records: Dict[str, Dict] = {}
