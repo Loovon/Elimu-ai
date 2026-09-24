@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import os
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -14,6 +15,27 @@ logger = logging.getLogger("elimu_crawler")
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CATALOGUE = BASE_DIR / "elimu_catalogue.json"
 SITEMAP_NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+ELIMU_SITEMAP_HEADERS = {
+    "User-Agent": "ElimuSitemapMonitor/1.0",
+    "Accept": "application/xml",
+    "Accept-Encoding": "gzip, deflate",
+}
+
+
+def _sitemap_headers() -> Dict[str, str]:
+    """Build authenticated headers for Elimu Library sitemap requests."""
+    token = os.getenv("ELIMU_TOKEN", "").strip()
+
+    if not token:
+        raise RuntimeError(
+            "ELIMU_TOKEN is not configured. "
+            "Add it to .env or the environment before crawling Elimu Library sitemaps."
+        )
+
+    return {
+        **ELIMU_SITEMAP_HEADERS,
+        "x-elimu-monitor": token,
+    }
 
 
 def canonical_url(url: str) -> str:
@@ -77,7 +99,11 @@ class SitemapCrawler:
         if self.sitemap in seen:
             return []
         seen.add(self.sitemap)
-        response = requests.get(self.sitemap, timeout=30)
+        response = requests.get(
+            self.sitemap,
+            headers=_sitemap_headers(),
+            timeout=30,
+        )
         response.raise_for_status()
         root = ET.fromstring(response.content)
         root_tag = root.tag.rsplit("}", 1)[-1]
