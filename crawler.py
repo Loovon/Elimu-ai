@@ -21,6 +21,9 @@ ELIMU_SITEMAP_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
 }
 
+PAGE_DELAY_SECONDS = 2.0
+MAX_PAGE_RETRIES = 5
+
 
 def _sitemap_headers() -> Dict[str, str]:
     """Build authenticated headers for Elimu Library sitemap requests."""
@@ -115,57 +118,97 @@ class SitemapCrawler:
             return urls
         return list(dict.fromkeys(locations))
 
-    def scrape(self, url):
-        """Fetch and parse one Elimu Library page."""
-        response = requests.get(
-            url,
-            headers={
-                "User-Agent": "ElimuSitemapMonitor/1.0",
-                "Accept": "text/html,application/xhtml+xml",
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-    
-        soup = BeautifulSoup(response.text, "html.parser")
-    
-        title = soup.title.get_text(" ", strip=True) if soup.title else ""
-    
-        description_tag = soup.find(
-            "meta",
-            attrs={"name": "description"},
-        )
-        keywords_tag = soup.find(
-            "meta",
-            attrs={"name": "keywords"},
-        )
-    
-        description = (
-            description_tag.get("content", "")
-            if description_tag
-            else ""
-        )
-    
-        keywords = (
-            keywords_tag.get("content", "")
-            if keywords_tag
-            else ""
-        )
-    
-        canonical = canonical_url(url)
-    
-        return {
-            "url": canonical,
-            "title": title,
-            "description": description,
-            "keywords": keywords,
-            "content": soup.get_text(" ", strip=True),
-            **infer_metadata(
-                canonical,
-                title,
-                description,
-            ),
-        }
+        def scrape(self, url):
+        """Fetch one Elimu Library page with rate limiting and 429 backoff."""
+        import time
+
+        for attempt in range(MAX_PAGE_RETRIES):
+            try:
+                time.sleep(PAGE_DELAY_SECONDS)
+
+                response = requests.get(
+                    url,
+                    headers=ELIMU_PAGE_HEADERS,
+                    timeout=30,
+                )
+
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+
+                    if retry_after:
+                        try:
+                            wait_seconds = max(float(retry_after), PAGE_DELAY_SECONDS)
+                        except ValueError:
+                            wait_seconds = PAGE_DELAY_SECONDS * (attempt + 2)
+                    else:
+                        wait_seconds = PAGE_DELAY_SECONDS * (attempt + 2)
+
+                    logger.warning(
+                        "429 rate limited for %s; waiting %.1fs (attempt %d/%d)",
+                        url,
+                        wait_seconds,
+                        attempt + 1,
+                        MAX_PAGE_RETRIES,
+                    )
+
+                    time.sleep(wait_seconds)
+                    continue
+
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, "html.parser")
+
+                title = soup.title.get_text(" ", strip=True) if soup.title else ""
+                description_tag = soup.find(
+                    "meta",
+                    attrs={"name": "description"},
+                )
+                keywords_tag = soup.find(
+                    "meta",
+                    attrs={"name": "keywords"},
+                )
+
+                description = (
+                    description_tag.get("content", "")
+                    if description_tag
+                    else ""
+                )
+                keywords = (
+                    keywords_tag.get("content", "")
+                    if keywords_tag
+                    else ""
+                )
+
+                canonical = canonical_url(url)
+
+                return {
+                    "url": canonical,
+                    "title": title,
+                    "description": description,
+                    "keywords": keywords,
+                    "content": soup.get_text(" ", strip=True),
+                    **infer_metadata(
+                        canonical,
+                        title,
+                        description,
+                    ),
+                }
+
+            except requests.RequestException as exc:
+                if attempt == MAX_PAGE_RETRIES - 1:
+                    raise
+
+                wait_seconds = PAGE_DELAY_SECONDS * (attempt + 2)
+
+                logger.warning(
+                    "page request failed for %s: %s; retrying in %.1fs",
+                    url,
+                    exc,
+                    wait_seconds,
+                )
+
+                time.sleep(wait_seconds)
+
+        raise RuntimeError(f"Failed to fetch page after retries: {url}")
         
 def crawl_sitemaps(sitemaps: Iterable[str]) -> List[Dict]:
     """Crawl multiple sitemap files and deduplicate URLs across sources."""
